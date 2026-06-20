@@ -436,20 +436,16 @@ async def ws_patrol(websocket: WebSocket):
                         }.get(v_type_raw, v_type_raw)
                         
                         plate_text = "PLATE-UNREAD"
-                        plate_conf = 0.85
+                        plate_conf = 0.0
                         for vehicle in vehicles:
-                            plate_region = ml_ocr.detect_plate_region(processed, vehicle.bbox)
-                            if plate_region is not None and plate_region.size > 0:
-                                ocr_res = ml_ocr.read_plate(plate_region)
-                                if ocr_res.confidence > 0.4:
-                                    plate_text = ocr_res.formatted_text
+                            vx1, vy1, vx2, vy2 = map(int, vehicle.bbox)
+                            h_p, w_p = processed.shape[:2]
+                            veh_crop = processed[max(0, vy1):min(h_p, vy2), max(0, vx1):min(w_p, vx2)]
+                            if veh_crop.size > 0:
+                                ocr_res = ml_ocr.read_plate_from_vehicle(veh_crop)
+                                if ocr_res.confidence > plate_conf:
+                                    plate_text = ocr_res.formatted_text or "PLATE-UNREAD"
                                     plate_conf = ocr_res.confidence
-                                    px1 = int(vehicle.bbox[0] + (vehicle.bbox[2]-vehicle.bbox[0])*0.3)
-                                    py1 = int(vehicle.bbox[1] + (vehicle.bbox[3]-vehicle.bbox[1])*0.6)
-                                    px2 = int(vehicle.bbox[0] + (vehicle.bbox[2]-vehicle.bbox[0])*0.7)
-                                    py2 = int(vehicle.bbox[1] + (vehicle.bbox[3]-vehicle.bbox[1])*0.8)
-                                    cv2.rectangle(processed, (px1, py1), (px2, py2), (255, 255, 0), 1)
-                                    cv2.putText(processed, f"Plate: {plate_text}", (px1, py1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
                         
                         # Draw Red overlay for violation on the enhanced processed frame
                         vx1, vy1, vx2, vy2 = map(int, v.bbox)

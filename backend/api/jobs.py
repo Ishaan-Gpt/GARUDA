@@ -146,11 +146,14 @@ def _run_ml_on_image(
         )
 
         # Stage 3: OCR on each vehicle — collect all visible plates
+        # Use read_plate_from_vehicle which scans the full vehicle crop for text
         all_plates = []
         for veh in vehicles:
-            plate_region = ml_ocr.detect_plate_region(processed, veh.bbox)
-            if plate_region is not None and plate_region.size > 0:
-                ocr_result = ml_ocr.read_plate(plate_region)
+            x1, y1, x2, y2 = map(int, veh.bbox)
+            h_img, w_img = processed.shape[:2]
+            veh_crop = processed[max(0, y1):min(h_img, y2), max(0, x1):min(w_img, x2)]
+            if veh_crop.size > 0:
+                ocr_result = ml_ocr.read_plate_from_vehicle(veh_crop)
                 all_plates.append({
                     "plate_text": ocr_result.formatted_text or "UNCLEAR",
                     "confidence": round(ocr_result.confidence, 3),
