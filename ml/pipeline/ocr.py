@@ -225,15 +225,15 @@ class PlateOCR:
 
         if self._ocr is not None:
             raw_text, confidence = self._extract_text(enhanced)
-            if not raw_text:
+            if not raw_text or confidence < 0.3:
                 # Try again on grayscale inverted (some plates: white-on-dark)
-                raw_text, confidence = self._extract_text(
+                raw_text2, confidence2 = self._extract_text(
                     cv2.bitwise_not(enhanced)
                 )
+                if confidence2 > confidence:
+                    raw_text, confidence = raw_text2, confidence2
 
-        if not raw_text:
-            raw_text, confidence = self._generate_deterministic_plate(plate_image)
-
+        # No fake/mock plate generation — return real OCR result or empty
         formatted, is_valid = self._parse_plate(raw_text)
         state_code = formatted[:2] if len(formatted) >= 2 else ""
         state_name = STATE_CODES.get(state_code, "Unknown")
@@ -245,37 +245,9 @@ class PlateOCR:
             state_code=state_code,
             state_name=state_name,
             is_valid=is_valid,
-            ocr_engine=self._engine_name if self._ocr is not None else "mock_generator",
+            ocr_engine=self._engine_name if self._ocr is not None else "none",
         )
 
-    def _generate_deterministic_plate(self, plate_image: np.ndarray) -> Tuple[str, float]:
-        """Generate a realistic Indian license plate deterministically based on image crop pixel sum"""
-        try:
-            # Resize image to a small fixed size to make the hash robust but unique
-            small = cv2.resize(plate_image, (16, 16))
-            pixel_sum = int(np.sum(small))
-        except Exception:
-            pixel_sum = int(np.sum(plate_image)) if plate_image is not None else 12345
-        
-        # Deterministic pseudo-random number generator (LCG)
-        seed = pixel_sum
-        def next_rand(mod):
-            nonlocal seed
-            seed = (seed * 1103515245 + 12345) & 0x7fffffff
-            return seed % mod
-            
-        state_codes = ["KA", "MH", "DL", "HR", "UP", "TS", "AP", "KL", "GJ", "TN", "WB"]
-        letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        
-        state = state_codes[next_rand(len(state_codes))]
-        dist = f"{next_rand(99) + 1:02d}"
-        alpha1 = letters[next_rand(26)]
-        alpha2 = letters[next_rand(26)]
-        num = f"{next_rand(9000) + 1000:04d}"
-        
-        plate_str = f"{state} {dist} {alpha1}{alpha2} {num}"
-        confidence = 0.90 + (next_rand(10) / 100.0) # 0.90 to 0.99
-        return plate_str, confidence
 
     def detect_plate_region(
         self,
@@ -422,11 +394,13 @@ class PlateOCR:
         """Multi-stage plate enhancement pipeline"""
         h, w = image.shape[:2]
 
-        # 1. Upscale small plates to minimum 60px height
-        if h < 60:
-            scale = 60.0 / h
+        # 1. Upscale small plates to minimum 80px height for better OCR accuracy
+        if h < 80:
+            scale = 80.0 / h
+            new_h = 80
+            new_w = max(int(w * scale), 200)  # Also ensure minimum width
             image = cv2.resize(
-                image, (int(w * scale), 60), interpolation=cv2.INTER_CUBIC
+                image, (new_w, new_h), interpolation=cv2.INTER_CUBIC
             )
 
         # 2. Convert to LAB → CLAHE on L channel → back to BGR

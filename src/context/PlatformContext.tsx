@@ -106,7 +106,7 @@ interface PlatformContextType {
   addViolation: (violation: Violation) => void;
   updateViolationStatus: (id: string, status: ViolationStatus, reviewer: string, reason?: string) => void;
   
-  submitUploadJob: (name: string, type: "Image" | "Video") => void;
+  submitUploadJob: (name: string, type: "Image" | "Video", file?: File) => void;
   clearNotifications: () => void;
   markNotificationRead: (id: string) => void;
   
@@ -639,8 +639,8 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
   }, []);
 
-  // Submit Batch Upload job
-  const submitUploadJob = useCallback(async (name: string, type: "Image" | "Video") => {
+  // Submit Batch Upload job — uses /jobs/upload (multipart) when file is present
+  const submitUploadJob = useCallback(async (name: string, type: "Image" | "Video", file?: File) => {
     const jobId = `JOB-${Date.now()}`;
     const newJob: ProcessingJob = {
       id: jobId,
@@ -655,20 +655,35 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
     
     setJobs(prev => [newJob, ...prev]);
-    triggerNotification("System Alert", `Inference Job ${jobId} queued for ${name}`, "low");
+    triggerNotification("System Alert", `Inference Job queued for ${name}`, "low");
 
     if (isBackendConnected) {
-      const headers: HeadersInit = token ? { 
-        "Content-Type": "application/json", 
-        "Authorization": `Bearer ${token}` 
-      } : { "Content-Type": "application/json" };
-
       try {
-        await fetch(`${API_BASE}/jobs`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ name, source_type: type })
-        });
+        if (file) {
+          // Real file upload — use multipart form data
+          const formData = new FormData();
+          formData.append("name", name);
+          formData.append("source_type", type);
+          formData.append("file", file, file.name);
+
+          const headers: HeadersInit = token ? { "Authorization": `Bearer ${token}` } : {};
+          await fetch(`${API_BASE}/jobs/upload`, {
+            method: "POST",
+            headers,  // Do NOT set Content-Type for FormData — browser sets it with boundary
+            body: formData
+          });
+        } else {
+          // No file — JSON create
+          const headers: HeadersInit = token ? { 
+            "Content-Type": "application/json", 
+            "Authorization": `Bearer ${token}` 
+          } : { "Content-Type": "application/json" };
+          await fetch(`${API_BASE}/jobs`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ name, source_type: type })
+          });
+        }
       } catch (e) {
         console.log("API offline, queuing locally");
       }
