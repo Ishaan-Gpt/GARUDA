@@ -200,7 +200,7 @@ def _run_ml_on_image(
                 "tier": 1,
                 "action": "PASSED",
                 "timestamp": timestamp_now,
-                "camera": {"id": f"JOB-{job_id}", "location": source_name, "coordinates": {}},
+                "camera": {"id": job_id, "location": source_name, "coordinates": {}},
                 "vehicle": {
                     "vehicle_class": best_plate.get("vehicle_class", "unknown"),
                     "license_plate": best_plate["plate_text"],
@@ -292,7 +292,7 @@ def _run_ml_on_image(
                     "tier": v.tier if hasattr(v, "tier") else 2,
                     "action": "HUMAN_REVIEW",
                     "timestamp": timestamp_now,
-                    "camera": {"id": f"JOB-{job_id}", "location": source_name, "coordinates": {}},
+                    "camera": {"id": job_id, "location": source_name, "coordinates": {}},
                     "vehicle": {
                         "vehicle_class": best_plate.get("vehicle_class", "unknown"),
                         "license_plate": best_plate["plate_text"],
@@ -502,7 +502,7 @@ async def get_job_violations(job_id: str, db: AsyncSession = Depends(get_db)):
     rows = (
         await db.execute(
             select(ViolationModel)
-            .where(ViolationModel.camera_id.like(f"JOB-{job_id}%"))
+            .where(ViolationModel.camera_id.like(f"{job_id}%"))
             .order_by(ViolationModel.created_at.desc())
         )
     ).scalars().all()

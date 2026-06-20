@@ -275,34 +275,56 @@ class PlateOCR:
 
         if self._engine_name == "easyocr" and self._ocr is not None:
             try:
-                results = self._ocr.readtext(vehicle_crop)
+                h, w = vehicle_crop.shape[:2]
+
+                # Build list of image candidates to try — upscale small crops aggressively
+                candidates = []
+
+                # Full vehicle crop (upscaled to min 150px height)
+                if h < 150:
+                    scale = max(150.0 / h, 200.0 / max(w, 1))
+                    up = cv2.resize(vehicle_crop, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+                    candidates.append(up)
+                else:
+                    candidates.append(vehicle_crop)
+
+                # Bottom 45% of vehicle crop (where plate is) — upscaled separately
+                plate_strip = vehicle_crop[int(h * 0.55):, :]
+                if plate_strip.size > 0:
+                    ph, pw = plate_strip.shape[:2]
+                    if ph > 5 and pw > 10:
+                        ps = max(100.0 / max(ph, 1), 3.0)
+                        plate_up = cv2.resize(plate_strip, (int(pw * ps), int(ph * ps)), interpolation=cv2.INTER_CUBIC)
+                        candidates.append(plate_up)
+
                 best_text = ""
                 best_conf = 0.0
 
-                for (bbox_pts, text, conf) in results:
-                    text_clean = re.sub(r"[^A-Z0-9\s\-]", "", text.upper().strip())
-                    if len(text_clean) < 4:
-                        continue
-                    # Try to match any plate pattern first
-                    matched = False
-                    for pattern in PLATE_PATTERNS:
-                        if pattern.search(text_clean):
-                            if conf > best_conf:
+                for img_candidate in candidates:
+                    results = self._ocr.readtext(img_candidate)
+                    for (bbox_pts, text, conf) in results:
+                        text_clean = re.sub(r"[^A-Z0-9\s\-]", "", text.upper().strip())
+                        if len(text_clean) < 4:
+                            continue
+                        # Priority: exact plate pattern match
+                        for pattern in PLATE_PATTERNS:
+                            if pattern.search(text_clean):
+                                if conf > best_conf:
+                                    best_conf = conf
+                                    best_text = text_clean
+                                break
+                        else:
+                            # Accept 6-12 char alphanumeric at lower confidence threshold
+                            no_sp = re.sub(r"[\s\-]", "", text_clean)
+                            if 6 <= len(no_sp) <= 12 and conf > best_conf and conf > 0.15:
                                 best_conf = conf
                                 best_text = text_clean
-                            matched = True
-                            break
-                    if not matched:
-                        # Accept 6-12 char alphanumeric if better confidence
-                        no_sp = re.sub(r"[\s\-]", "", text_clean)
-                        if 6 <= len(no_sp) <= 12 and conf > best_conf:
-                            best_conf = conf
-                            best_text = text_clean
 
-                if best_text and best_conf > 0.2:
+                if best_text and best_conf > 0.15:
                     formatted, is_valid = self._parse_plate(best_text)
                     state_code = formatted[:2] if len(formatted) >= 2 else ""
                     state_name = STATE_CODES.get(state_code, "Unknown")
+                    logger.info("EasyOCR plate found: '%s' conf=%.2f", formatted or best_text, best_conf)
                     return PlateResult(
                         raw_text=best_text,
                         formatted_text=formatted,
@@ -315,7 +337,7 @@ class PlateOCR:
             except Exception as e:
                 logger.warning("EasyOCR vehicle scan error: %s", e)
 
-        # Fallback: extract plate region and run standard read_plate
+        # Fallback: extract plate region contour and run standard read_plate
         plate_region = self.detect_plate_region(
             vehicle_crop,
             [0, 0, vehicle_crop.shape[1], vehicle_crop.shape[0]],
