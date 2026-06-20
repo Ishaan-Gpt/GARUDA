@@ -131,58 +131,8 @@ if (typeof window !== "undefined") {
   WS_BASE = `${wsProtocol}://${window.location.hostname}:8000`;
 }
 
-// Helper to generate plate
-const generatePlate = () => {
-  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  const numbers = "0123456789";
-  return `${numbers[Math.floor(Math.random() * 10)]}${letters[Math.floor(Math.random() * 26)]}${letters[Math.floor(Math.random() * 26)]}-${numbers[Math.floor(Math.random() * 10)]}${numbers[Math.floor(Math.random() * 10)]}${numbers[Math.floor(Math.random() * 10)]}`;
-};
-
-// Seed initial cameras
-const initialCameras: Camera[] = [
-  { id: "CAM-101", name: "Broadway & 5th Ave", rtspUrl: "rtsp://10.200.41.10/live/broadway_5th", location: "Downtown Zone A", status: "Active", lastHeartbeat: new Date().toISOString(), fps: 30, resolution: "1920x1080" },
-  { id: "CAM-202", name: "Tunnel Exit Northbound", rtspUrl: "rtsp://10.200.41.11/live/tunnel_north", location: "Highway Sector 2", status: "Active", lastHeartbeat: new Date().toISOString(), fps: 30, resolution: "1920x1080" },
-  { id: "CAM-303", name: "Highway Toll Gate 4", rtspUrl: "rtsp://10.200.41.12/live/toll_gate_4", location: "Tollway Plaza", status: "Active", lastHeartbeat: new Date().toISOString(), fps: 25, resolution: "1280x720" },
-  { id: "CAM-404", name: "Commercial St & Market Rd", rtspUrl: "rtsp://10.200.41.13/live/commercial_market", location: "Downtown Zone C", status: "Active", lastHeartbeat: new Date().toISOString(), fps: 30, resolution: "1920x1080" },
-  { id: "CAM-505", name: "School Zone Crossing East", rtspUrl: "rtsp://10.200.41.14/live/school_zone_east", location: "Academic District", status: "Disabled", lastHeartbeat: new Date().toISOString(), fps: 0, resolution: "1920x1080" }
-];
-
-// Seed initial violations
-const initialViolations: Violation[] = [
-  {
-    id: "VIO-20260620-001",
-    type: "Red Light",
-    timestamp: new Date(Date.now() - 3600000 * 2).toISOString(),
-    location: "Downtown Zone A",
-    cameraId: "CAM-101",
-    vehicleType: "Sedan",
-    plateNumber: "3AB-289",
-    confidenceScore: 94.2,
-    status: "Under Review",
-    beforeFrame: { timestamp: new Date(Date.now() - 3600000 * 2 - 1000).toISOString(), vehicleBox: { x: 50, y: 120, w: 90, h: 55 }, plateBox: { x: 90, y: 155, w: 20, h: 10 }, lightColor: "Green", vehicleSvgType: "sedan", color: "#3B82F6" },
-    violationFrame: { timestamp: new Date(Date.now() - 3600000 * 2).toISOString(), vehicleBox: { x: 120, y: 100, w: 95, h: 58 }, plateBox: { x: 165, y: 138, w: 22, h: 11 }, lightColor: "Red", vehicleSvgType: "sedan", color: "#3B82F6" },
-    afterFrame: { timestamp: new Date(Date.now() - 3600000 * 2 + 1000).toISOString(), vehicleBox: { x: 220, y: 80, w: 90, h: 55 }, plateBox: { x: 260, y: 115, w: 20, h: 10 }, lightColor: "Red", vehicleSvgType: "sedan", color: "#3B82F6" }
-  },
-  {
-    id: "VIO-20260620-002",
-    type: "Speeding",
-    timestamp: new Date(Date.now() - 3600000 * 1.5).toISOString(),
-    location: "Highway Sector 2",
-    cameraId: "CAM-202",
-    vehicleType: "SUV",
-    plateNumber: "9KX-452",
-    confidenceScore: 98.7,
-    status: "Approved",
-    reviewer: "Officer Keshav",
-    reviewedAt: new Date(Date.now() - 3600000 * 1.2).toISOString(),
-    beforeFrame: { timestamp: new Date(Date.now() - 3600000 * 1.5 - 500).toISOString(), vehicleBox: { x: 40, y: 90, w: 110, h: 70 }, plateBox: { x: 80, y: 140, w: 25, h: 12 }, speed: 74, vehicleSvgType: "suv", color: "#64748B" },
-    violationFrame: { timestamp: new Date(Date.now() - 3600000 * 1.5).toISOString(), vehicleBox: { x: 150, y: 85, w: 110, h: 70 }, plateBox: { x: 190, y: 135, w: 25, h: 12 }, speed: 88, vehicleSvgType: "suv", color: "#64748B" },
-    afterFrame: { timestamp: new Date(Date.now() - 3600000 * 1.5 + 500).toISOString(), vehicleBox: { x: 260, y: 80, w: 110, h: 70 }, plateBox: { x: 300, y: 130, w: 25, h: 12 }, speed: 89, vehicleSvgType: "suv", color: "#64748B" }
-  }
-];
-
 const initialNotifications: SystemNotification[] = [
-  { id: "NOT-001", type: "System Alert", message: "Garuda Intelligence Platform Online. All inference modules active.", timestamp: new Date(Date.now() - 3600000 * 3).toISOString(), read: true, severity: "low" }
+  { id: "NOT-001", type: "System Alert", message: "Garuda Intelligence Platform Online. Connecting to backend...", timestamp: new Date().toISOString(), read: false, severity: "low" }
 ];
 
 export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -194,12 +144,12 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
 
   const [role, setRole] = useState<UserRole>("Admin");
-  const [cameras, setCameras] = useState<Camera[]>(initialCameras);
-  const [violations, setViolations] = useState<Violation[]>(initialViolations);
+  const [cameras, setCameras] = useState<Camera[]>([]);
+  const [violations, setViolations] = useState<Violation[]>([]);
   const [jobs, setJobs] = useState<ProcessingJob[]>([]);
   const [notifications, setNotifications] = useState<SystemNotification[]>(initialNotifications);
   
-  const [isSimulating, setIsSimulating] = useState(true);
+  const [isSimulating, setIsSimulating] = useState(false);
   const [simulationInterval, setSimulationInterval] = useState(12000); 
   const [isBackendConnected, setIsBackendConnected] = useState(false);
 
@@ -482,41 +432,22 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         localStorage.setItem("garuda_token", data.access_token);
         setToken(data.access_token);
         setUser({
-          id: "USR-00" + Math.floor(Math.random() * 9 + 1),
-          name: data.username,
+          id: data.id || data.user_id || "USR-001",
+          name: data.username || data.name,
           email: data.email,
           role: data.role as UserRole,
           status: "Active"
         });
         setRole(data.role as UserRole);
-        triggerNotification("System Alert", `Welcome back, ${data.username}! Successful authentication log generated.`, "low");
+        triggerNotification("System Alert", `Welcome back, ${data.username || data.name}! Session authenticated.`, "low");
         return true;
       } else {
         alert(data.detail || "Invalid login credentials.");
         return false;
       }
     } catch (e) {
-      console.log("Auth backend offline. Falling back to local offline mock login.");
-      // Fallback local logins
-      const username = email.split("@")[0];
-      const name = username.charAt(0).toUpperCase() + username.slice(1);
-      let derivedRole: UserRole = "Operator";
-      if (username.includes("keshav")) derivedRole = "Admin";
-      else if (username.includes("priya")) derivedRole = "Reviewer";
-      else if (username.includes("sanjay")) derivedRole = "Supervisor";
-
-      localStorage.setItem("garuda_token", "mock_local_jwt_token");
-      setToken("mock_local_jwt_token");
-      setUser({
-        id: "USR-MOCK",
-        name,
-        email,
-        role: derivedRole,
-        status: "Active"
-      });
-      setRole(derivedRole);
-      triggerNotification("System Alert", `Simulated Offline Logged in as: ${name}`, "low");
-      return true;
+      alert("Cannot connect to backend. Please ensure the server is running.");
+      return false;
     }
   };
 
@@ -710,7 +641,7 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   // Submit Batch Upload job
   const submitUploadJob = useCallback(async (name: string, type: "Image" | "Video") => {
-    const jobId = `JOB-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const jobId = `JOB-${Date.now()}`;
     const newJob: ProcessingJob = {
       id: jobId,
       name,
@@ -744,7 +675,7 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, [triggerNotification, isBackendConnected, token]);
 
-  // Client-side fallback progress simulator (runs ONLY if backend is offline)
+  // Client-side fallback progress simulator (runs ONLY if backend is completely offline)
   useEffect(() => {
     if (isBackendConnected) return;
 
@@ -830,79 +761,15 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return () => clearInterval(jobTimer);
   }, [cameras, isBackendConnected, addViolation, triggerNotification]);
 
-  // Client-side fallback violation simulation loop (runs ONLY if backend is offline)
-  useEffect(() => {
-    if (!isSimulating || isBackendConnected) return;
-
-    const generator = setInterval(() => {
-      const activeCams = cameras.filter(c => c.status === "Active");
-      if (activeCams.length === 0) return;
-
-      const randomCam = activeCams[Math.floor(Math.random() * activeCams.length)];
-      const isViolation = Math.random() < 0.8;
-      
-      if (isViolation) {
-        const types = ["Speeding", "Red Light", "Seatbelt", "Wrong Way", "No Helmet"];
-        const type = types[Math.floor(Math.random() * types.length)];
-        
-        const selectedSvg: EvidenceFrame["vehicleSvgType"] = type === "No Helmet" ? "motorcycle" : (["sedan", "suv", "truck"][Math.floor(Math.random() * 3)] as any);
-        const vehicleType = selectedSvg === "motorcycle" ? "Motorcycle" : (selectedSvg === "truck" ? "Heavy Truck" : "Passenger Vehicle");
-        
-        const colors = ["#EF4444", "#3B82F6", "#10B981", "#F59E0B", "#8B5CF6", "#1E293B"];
-        const selectedColor = colors[Math.floor(Math.random() * colors.length)];
-        const plate = generatePlate();
-        const vId = `VIO-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Math.floor(100 + Math.random() * 900)}`;
-
-        const newVio: Violation = {
-          id: vId,
-          type,
-          timestamp: new Date().toISOString(),
-          location: randomCam.location,
-          cameraId: randomCam.id,
-          vehicleType,
-          plateNumber: plate,
-          confidenceScore: parseFloat((78 + Math.random() * 21).toFixed(1)),
-          status: "Detected",
-          beforeFrame: { timestamp: new Date(Date.now() - 1000).toISOString(), vehicleBox: { x: 50, y: 120, w: 90, h: 55 }, plateBox: { x: 90, y: 155, w: 20, h: 10 }, lightColor: type === "Red Light" ? "Green" : undefined, speed: type === "Speeding" ? 54 : undefined, vehicleSvgType: selectedSvg, color: selectedColor },
-          violationFrame: { timestamp: new Date().toISOString(), vehicleBox: { x: 120, y: 100, w: 95, h: 58 }, plateBox: { x: 165, y: 138, w: 22, h: 11 }, lightColor: type === "Red Light" ? "Red" : undefined, speed: type === "Speeding" ? 82 : undefined, vehicleSvgType: selectedSvg, color: selectedColor },
-          afterFrame: { timestamp: new Date(Date.now() + 1000).toISOString(), vehicleBox: { x: 220, y: 80, w: 90, h: 55 }, plateBox: { x: 260, y: 115, w: 20, h: 10 }, lightColor: type === "Red Light" ? "Red" : undefined, speed: type === "Speeding" ? 84 : undefined, vehicleSvgType: selectedSvg, color: selectedColor }
-        };
-
-        setViolations(prev => [newVio, ...prev]);
-        
-        if (newVio.confidenceScore > 90) {
-          triggerNotification(
-            "Violation Spike", 
-            `High Confidence ${type} Violation detected on ${randomCam.name} (${newVio.confidenceScore}%)`,
-            "medium"
-          );
-        }
-      } else {
-        if (Math.random() < 0.15) {
-          const targetIndex = Math.floor(Math.random() * cameras.length);
-          const target = cameras[targetIndex];
-          if (target.status === "Active") {
-            toggleCameraStatus(target.id, "Offline");
-          } else if (target.status === "Offline" && Math.random() < 0.5) {
-            toggleCameraStatus(target.id, "Active");
-          }
-        }
-      }
-    }, simulationInterval);
-
-    return () => clearInterval(generator);
-  }, [cameras, isSimulating, simulationInterval, isBackendConnected, toggleCameraStatus, triggerNotification]);
-
-  // Periodic heartbeat updater for active cameras (only if backend is offline)
+  // Periodic heartbeat for active cameras (only when backend offline)
   useEffect(() => {
     if (isBackendConnected) return;
     const hbTimer = setInterval(() => {
       setCameras(prev => prev.map(c => c.status === "Active" ? {
         ...c,
-        lastHeartbeat: new Date().toISOString(),
-        fps: Math.max(24, Math.min(30, Math.floor(c.fps + (Math.random() * 4 - 2))))
+        lastHeartbeat: new Date().toISOString()
       } : c));
-    }, 4000);
+    }, 10000);
     return () => clearInterval(hbTimer);
   }, [isBackendConnected]);
 

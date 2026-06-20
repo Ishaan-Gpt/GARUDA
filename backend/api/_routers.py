@@ -435,7 +435,7 @@ async def ws_patrol(websocket: WebSocket):
                             "drowsy_driving": "Drowsy"
                         }.get(v_type_raw, v_type_raw)
                         
-                        plate_text = f"KA-03-P-{random.randint(1000, 9999)}"
+                        plate_text = "PLATE-UNREAD"
                         plate_conf = 0.85
                         for vehicle in vehicles:
                             plate_region = ml_ocr.detect_plate_region(processed, vehicle.bbox)
@@ -529,87 +529,11 @@ async def ws_patrol(websocket: WebSocket):
                     is_violation = False
             
             if not is_violation and (is_simulator or not ml_available):
-                # Fallback / Simulator 2% trigger
-                is_violation = random.random() < 0.02
-                
-                # Draw standard vehicle bounding box overlay on every frame
-                vx1, vy1 = int(w * 0.25), int(h * 0.35)
-                vx2, vy2 = int(w * 0.75), int(h * 0.75)
-                color = (0, 0, 255) if is_violation else (0, 255, 0)
-                cv2.rectangle(img, (vx1, vy1), (vx2, vy2), color, 2)
-                cv2.putText(img, "Vehicle: Car (94.5%)", (vx1, vy1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-                
-                px1, py1 = int(w * 0.45), int(h * 0.6)
-                px2, py2 = int(w * 0.65), int(h * 0.68)
-                cv2.rectangle(img, (px1, py1), (px2, py2), (255, 255, 0), 1)
-                
-                plate_text = f"KA-03-P-{random.randint(1000, 9999)}"
-                cv2.putText(img, f"Plate: {plate_text} (88.7%)", (px1, py1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
-                
-                if is_violation:
-                    v_type = random.choice(["No Helmet", "Speeding", "Seatbelt", "Red Light", "Wrong Way"])
-                    
-                    cv2.rectangle(img, (10, 10), (w - 10, 50), (0, 0, 255), -1)
-                    cv2.putText(img, f"WARNING: {v_type.upper()} DETECTED", (20, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                    
-                    vid = f"VIO-PATROL-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
-                    
-                    record = {
-                        "violation_id": vid,
-                        "tier": 2,
-                        "action": "HUMAN_REVIEW",
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
-                        "camera": {"id": camera_id, "location": location, "coordinates": {}},
-                        "vehicle": {
-                            "vehicle_class": "car", "color": "white",
-                            "license_plate": plate_text, "plate_confidence": 0.88,
-                            "plate_valid": True, "plate_state": "Karnataka",
-                            "repeat_offender": False, "prior_violations": 0,
-                        },
-                        "violations": [{
-                            "type": v_type,
-                            "confidence": 0.89,
-                            "severity": "high",
-                            "fine_amount_inr": 1000,
-                            "bbox": [vx1, vy1, vx2 - vx1, vy2 - vy1],
-                            "metadata": {"source": "patrol"},
-                        }],
-                        "driver_state": {"alerts": [], "total_alerts": 0},
-                        "evidence": {
-                            "annotated_image": f"/evidence/annotated/{vid}.jpg", 
-                            "raw_frame": f"/evidence/raw/{vid}.jpg"
-                        },
-                    }
-                    
-                    import os
-                    os.makedirs("evidence/annotated", exist_ok=True)
-                    cv2.imwrite(f"evidence/annotated/{vid}.jpg", img)
-                    
-                    async with AsyncSessionLocal() as session:
-                        await save_violation(session, record)
-                        from ..core.database import upsert_vehicle
-                        await upsert_vehicle(session, plate_text, v_type)
-                    
-                    await broadcast_violation({
-                        "event": "violation_detected",
-                        "violation_id": vid,
-                        "violation_type": v_type,
-                        "confidence": 89.0,
-                        "tier": 2,
-                        "plate": plate_text,
-                        "camera_id": camera_id,
-                        "location": location,
-                        "timestamp": record["timestamp"],
-                        "severity": "high",
-                        "annotated_image_url": f"/evidence/annotated/{vid}.jpg",
-                    })
-                    
-                    violation_info = {
-                        "violation_id": vid,
-                        "type": v_type,
-                        "plate": plate_text,
-                        "confidence": 89.0
-                    }
+                # When ML is unavailable draw a simple "no ML" watermark but do NOT generate fake violations
+                cv2.putText(img, "ML OFFLINE", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 1)
+                vehicles = []
+                persons = []
+                detections = []
             
             # Encode annotated image back to base64
             _, buffer = cv2.imencode(".jpg", img)
@@ -618,7 +542,12 @@ async def ws_patrol(websocket: WebSocket):
             # Send frame response back to patrol client
             await websocket.send_json({
                 "frame": annotated_b64,
-                "violation": violation_info
+                "violation": violation_info,
+                "detections": {
+                    "vehicles": len(vehicles) if 'vehicles' in dir() else 0,
+                    "persons": len(persons) if 'persons' in dir() else 0,
+                    "total": len(detections) if 'detections' in dir() else 0,
+                }
             })
             
     except WebSocketDisconnect:

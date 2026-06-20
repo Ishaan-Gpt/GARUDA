@@ -1,1011 +1,693 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 
-interface SubmissionLog {
+type Tab = "record" | "analyze" | "status";
+type RecordState = "idle" | "recording" | "paused";
+
+interface MLCard {
+  id: string;
+  timestamp: string;
+  annotatedFrame: string;
+  vehicles: number;
+  persons: number;
+  plates: string[];
+  violations: { type: string; confidence: number }[];
+  severity: string;
+  violationId?: string;
+}
+
+interface Submission {
   violation_id: string;
   violation_type: string;
   plate_text: string;
   location: string;
   timestamp: string;
   status: string;
+  frame?: string;
 }
 
 export default function PublicPage() {
-  const [activeTab, setActiveTab] = useState<"report" | "submissions">("report");
-  const [submissions, setSubmissions] = useState<SubmissionLog[]>([]);
-  
-  // Camera & Stream states - ACTIVE BY DEFAULT (No resistance)
+  const [tab, setTab] = useState<Tab>("record");
+  const [recordState, setRecordState] = useState<RecordState>("idle");
+  const [mlCards, setMlCards] = useState<MLCard[]>([]);
+  const [submissions, setSubmissions] = useState<Submission[]>([]);
+  const [newAnalyzeCount, setNewAnalyzeCount] = useState(0);
+
+  // Camera refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
-  
-  const [active, setActive] = useState(true);
-  const [cameraLabel, setCameraLabel] = useState<string>("Initializing Camera...");
-  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
-  const [streamError, setStreamError] = useState<string | null>(null);
-  const [annotatedFrame, setAnnotatedFrame] = useState<string | null>(null);
-  
-  // Simulated Feed states
-  const [isSimulatedCamera, setIsSimulatedCamera] = useState(false);
-  const simIntervalRef = useRef<any>(null);
-  
-  // Snapshot/Edit form state
-  const [capturedFrame, setCapturedFrame] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState({
-    violation_id: "",
-    violation_type: "No Helmet",
-    plate_text: "",
-    location: "Public Edge Capture",
-    severity: "medium"
-  });
-  const [isEditing, setIsEditing] = useState(false);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [submitSuccess, setSubmitSuccess] = useState<string | null>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  
-  // Auto-alert state from WS
-  const [violationAlertActive, setViolationAlertActive] = useState(false);
+  const intervalRef = useRef<any>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
-  // Initialize camera list and auto-select BACK camera
+  // Camera state
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [cameraLabel, setCameraLabel] = useState("Tap Record to start");
+  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState("");
+  const [location, setLocation] = useState("Public Edge Capture");
+
+  // Submit state
+  const [submitting, setSubmitting] = useState<string | null>(null);
+  const [submitResult, setSubmitResult] = useState<{ id: string; ok: boolean } | null>(null);
+
+  const apiBase = () => {
+    if (typeof window === "undefined") return "http://localhost:8000";
+    const proto = window.location.protocol === "https:" ? "https" : "http";
+    return `${proto}://${window.location.hostname}:8000`;
+  };
+
+  const wsBase = () => {
+    if (typeof window === "undefined") return "ws://localhost:8000";
+    const proto = window.location.protocol === "https:" ? "wss" : "ws";
+    return `${proto}://${window.location.hostname}:8000`;
+  };
+
+  // Load submissions from localStorage on mount
   useEffect(() => {
-    const listDevices = async () => {
-      try {
-        const devs = await navigator.mediaDevices.enumerateDevices();
-        const videoDevs = devs.filter(d => d.kind === "videoinput");
-        setDevices(videoDevs);
-        
-        // Auto-select BACK camera (environment facing) if present
-        const backCam = videoDevs.find(d => 
-          d.label.toLowerCase().includes("back") || 
-          d.label.toLowerCase().includes("rear") || 
-          d.label.toLowerCase().includes("environment") || 
-          d.label.toLowerCase().includes("outward")
-        );
-        
-        if (backCam) {
-          setSelectedDeviceId(backCam.deviceId);
-          console.log("Auto-selected BACK camera:", backCam.label);
-        } else if (videoDevs.length > 0) {
-          setSelectedDeviceId(videoDevs[0].deviceId);
-          console.log("No explicit back camera found. Defaulting to first device.");
-        }
-      } catch (e) {
-        console.error("Error listing camera devices:", e);
-      }
-    };
-    listDevices();
     loadSubmissions();
   }, []);
 
-  // Load submissions from localStorage and refresh statuses
   const loadSubmissions = async () => {
     try {
       const stored = localStorage.getItem("garuda_public_submissions");
       if (stored) {
-        const list: SubmissionLog[] = JSON.parse(stored);
-        setSubmissions(list);
-        
-        // Refresh statuses in background
-        const updatedList = await Promise.all(
+        const list: Submission[] = JSON.parse(stored);
+        // Refresh statuses from backend
+        const refreshed = await Promise.all(
           list.map(async (item) => {
             try {
-              const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
-              const protocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "https" : "http";
-              const res = await fetch(`${protocol}://${host}:8000/api/v1/violations/${item.violation_id}`);
+              const res = await fetch(`${apiBase()}/api/v1/violations/${item.violation_id}`);
               if (res.ok) {
-                const data = await res.json();
-                return { ...item, status: data.status };
+                const d = await res.json();
+                return { ...item, status: d.status ?? item.status };
               }
-            } catch (e) {
-              console.error(`Error checking status for ${item.violation_id}:`, e);
-            }
+            } catch {}
             return item;
           })
         );
-        setSubmissions(updatedList);
-        localStorage.setItem("garuda_public_submissions", JSON.stringify(updatedList));
+        setSubmissions(refreshed);
+        localStorage.setItem("garuda_public_submissions", JSON.stringify(refreshed));
       }
-    } catch (err) {
-      console.error("Error reading submissions from local storage:", err);
-    }
+    } catch {}
   };
 
-  // Manage streams & socket
-  useEffect(() => {
-    if (!active) {
-      stopFeeds();
-      return;
+  // Initialize camera — only preview, do NOT start sending frames
+  const startCamera = useCallback(async (deviceId?: string) => {
+    setCameraError(null);
+    setCameraReady(false);
+    setCameraLabel("Initializing camera...");
+
+    // Stop previous stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
     }
 
-    setStreamError(null);
-    setSubmitSuccess(null);
-    setSubmitError(null);
-
-    // Connect to backend WebSocket for real-time annotations
-    const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
-    const wsProtocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss" : "ws";
-    const wsUrl = `${wsProtocol}://${host}:8000/ws/patrol`;
-    const ws = new WebSocket(wsUrl);
-    socketRef.current = ws;
-
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.frame) {
-          setAnnotatedFrame(data.frame);
-        }
-        if (data.violation) {
-          setViolationAlertActive(true);
-          playBeep();
-          
-          // Prefill editing form with auto-detected violation
-          const generatedId = `VIO-PUB-${Date.now().toString().slice(-6)}-${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
-          setEditForm({
-            violation_id: generatedId,
-            violation_type: mapViolationType(data.violation.type),
-            plate_text: data.violation.plate || "",
-            location: editForm.location,
-            severity: "medium"
-          });
-          setCapturedFrame(data.frame);
-          setIsEditing(true);
-          
-          setTimeout(() => {
-            setViolationAlertActive(false);
-          }, 3500);
-        }
-      } catch (e) {
-        console.error("Error parsing patrol WS returned frames:", e);
-      }
-    };
-
-    if (isSimulatedCamera) {
-      startSimulatedInference();
-    } else {
-      startWebcamStream();
-    }
-
-    return () => {
-      stopFeeds();
-    };
-  }, [active, selectedDeviceId, isSimulatedCamera]);
-
-  const mapViolationType = (rawType: string): string => {
-    const list = ["No Helmet", "Speeding", "Seatbelt", "Red Light", "Wrong Way", "Illegal Parking"];
-    const found = list.find(l => l.toLowerCase() === rawType.toLowerCase() || rawType.toLowerCase().includes(l.toLowerCase()));
-    return found || "No Helmet";
-  };
-
-  const startWebcamStream = async () => {
     try {
       const constraints: MediaStreamConstraints = {
-        video: selectedDeviceId 
-          ? { deviceId: { exact: selectedDeviceId }, width: 1280, height: 720 } 
-          : { facingMode: { ideal: "environment" }, width: 1280, height: 720 }
+        video: deviceId
+          ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+          : { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
       };
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      streamRef.current = stream;
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        videoRef.current.play();
-        const activeTrack = stream.getVideoTracks()[0];
-        setCameraLabel(activeTrack.label || "Device Rear Camera");
-      }
+        await videoRef.current.play();
+        const track = stream.getVideoTracks()[0];
+        setCameraLabel(track.label || "Camera active");
+        setCameraReady(true);
 
-      startCaptureLoop();
-    } catch (err: any) {
-      console.error("getUserMedia error:", err);
-      // Fallback constraint if exact device fails (common on some mobiles)
-      try {
-        const fallbackStream = await navigator.mediaDevices.getUserMedia({ 
-          video: { facingMode: "environment" } 
-        });
-        if (videoRef.current) {
-          videoRef.current.srcObject = fallbackStream;
-          videoRef.current.play();
-          setCameraLabel("Device Camera (Auto-Fallback)");
+        // Enumerate devices after permission granted
+        const all = await navigator.mediaDevices.enumerateDevices();
+        const vids = all.filter((d) => d.kind === "videoinput");
+        setDevices(vids);
+        if (!deviceId && vids.length > 0) {
+          // Try to auto-select back camera
+          const back = vids.find(
+            (d) =>
+              d.label.toLowerCase().includes("back") ||
+              d.label.toLowerCase().includes("rear") ||
+              d.label.toLowerCase().includes("environment")
+          );
+          if (back && back.deviceId !== track.getSettings().deviceId) {
+            setSelectedDeviceId(back.deviceId);
+          }
         }
-        startCaptureLoop();
-      } catch (fbErr) {
-        setStreamError("Webcam access blocked or device unavailable. Switching to Simulated Radar Fallback.");
-        setIsSimulatedCamera(true);
+      }
+    } catch (err: any) {
+      // Fallback: try environment facing without exact device
+      try {
+        const fallback = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+          audio: false,
+        });
+        streamRef.current = fallback;
+        if (videoRef.current) {
+          videoRef.current.srcObject = fallback;
+          await videoRef.current.play();
+          setCameraLabel("Camera (fallback)");
+          setCameraReady(true);
+        }
+      } catch (fbErr: any) {
+        setCameraError(fbErr.message || "Camera access denied");
+        setCameraLabel("Camera unavailable");
       }
     }
-  };
+  }, []);
 
-  const startCaptureLoop = () => {
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-    if (!canvas || !video) return;
+  // Start recording → open WS → begin frame loop
+  const startRecording = useCallback(() => {
+    if (!cameraReady) return;
 
-    const ctx = canvas.getContext("2d");
-    const interval = setInterval(() => {
-      if (video.paused || video.ended || !socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
-        return;
+    const ws = new WebSocket(`${wsBase()}/ws/patrol`);
+    socketRef.current = ws;
+
+    ws.onopen = () => {
+      // 3fps — lightweight enough for phone
+      intervalRef.current = setInterval(() => {
+        const canvas = canvasRef.current;
+        const video = videoRef.current;
+        if (!canvas || !video || !socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.5);
+        socketRef.current.send(JSON.stringify({ frame: dataUrl, camera_id: "PUBLIC-PORTAL", location }));
+      }, 333);
+    };
+
+    ws.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.frame) {
+          const card: MLCard = {
+            id: `ML-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString(),
+            annotatedFrame: data.frame,
+            vehicles: data.detections?.vehicles ?? 0,
+            persons: data.detections?.persons ?? 0,
+            plates: data.violation?.plate ? [data.violation.plate] : [],
+            violations: data.violation
+              ? [{ type: data.violation.type, confidence: data.violation.confidence }]
+              : [],
+            severity: data.violation ? "high" : "none",
+            violationId: data.violation?.violation_id,
+          };
+          // Only add card if there's something detected or violation
+          if (data.violation || data.detections?.vehicles > 0 || data.detections?.persons > 0) {
+            setMlCards((prev) => [card, ...prev].slice(0, 30));
+            if (tab !== "analyze") setNewAnalyzeCount((n) => n + 1);
+          }
+        }
+      } catch {}
+    };
+
+    ws.onerror = () => ws.close();
+    ws.onclose = () => {
+      if (recordState === "recording") {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
       }
-      ctx?.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
-      
-      socketRef.current.send(JSON.stringify({
-        frame: dataUrl,
-        camera_id: "PUBLIC-PORTAL",
-        location: editForm.location
-      }));
-    }, 200);
+    };
 
-    simIntervalRef.current = interval;
-  };
+    setRecordState("recording");
+  }, [cameraReady, location, tab, recordState]);
 
-  const startSimulatedInference = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    setCameraLabel("Virtual Simulated Radar Scope");
+  const pauseRecording = useCallback(() => {
+    clearInterval(intervalRef.current);
+    intervalRef.current = null;
+    setRecordState("paused");
+  }, []);
 
-    let degrees = 0;
-    const interval = setInterval(() => {
-      if (!ctx || !socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
-
-      ctx.fillStyle = "#090D1A";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-      ctx.strokeStyle = "rgba(234, 179, 8, 0.4)";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(canvas.width / 2, canvas.height / 2, 160, 0, 2 * Math.PI);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(canvas.width / 2, canvas.height / 2, 80, 0, 2 * Math.PI);
-      ctx.stroke();
-
-      ctx.save();
-      ctx.translate(canvas.width / 2, canvas.height / 2);
-      ctx.rotate((degrees * Math.PI) / 180);
-      ctx.strokeStyle = "rgba(234, 179, 8, 0.75)";
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(0, -160);
-      ctx.stroke();
-      ctx.restore();
-
-      degrees = (degrees + 6) % 360;
-
-      ctx.fillStyle = "#E2E8F0";
-      const carOffset = (degrees * 1.5) % (canvas.width + 100) - 50;
-      ctx.fillRect(carOffset, canvas.height / 2 - 10, 45, 20);
-
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
-      socketRef.current.send(JSON.stringify({
-        frame: dataUrl,
-        camera_id: "PUBLIC-SIM-01",
-        location: editForm.location
-      }));
-    }, 200);
-
-    simIntervalRef.current = interval;
-  };
-
-  const stopFeeds = () => {
-    if (simIntervalRef.current) {
-      clearInterval(simIntervalRef.current);
-      simIntervalRef.current = null;
+  const resumeRecording = useCallback(() => {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
+      startRecording();
+      return;
     }
-    if (videoRef.current && videoRef.current.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
-    }
+    intervalRef.current = setInterval(() => {
+      const canvas = canvasRef.current;
+      const video = videoRef.current;
+      if (!canvas || !video || !socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      socketRef.current.send(JSON.stringify({ frame: canvas.toDataURL("image/jpeg", 0.5), camera_id: "PUBLIC-PORTAL", location }));
+    }, 333);
+    setRecordState("recording");
+  }, [startRecording, location]);
+
+  const stopStream = useCallback(() => {
+    clearInterval(intervalRef.current);
+    intervalRef.current = null;
     if (socketRef.current) {
       socketRef.current.close();
       socketRef.current = null;
     }
-    setAnnotatedFrame(null);
-  };
+    setRecordState("idle");
+  }, []);
 
-  const playBeep = () => {
-    try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return;
-      const audioCtx = new AudioCtx();
-      const oscillator = audioCtx.createOscillator();
-      const gainNode = audioCtx.createGain();
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopStream();
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, [stopStream]);
 
-      oscillator.connect(gainNode);
-      gainNode.connect(audioCtx.destination);
+  // Re-init camera when device changes
+  useEffect(() => {
+    if (selectedDeviceId) startCamera(selectedDeviceId);
+  }, [selectedDeviceId]);
 
-      oscillator.type = "sine";
-      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
-      gainNode.gain.setValueAtTime(0.15, audioCtx.currentTime);
-
-      oscillator.start();
-      oscillator.stop(audioCtx.currentTime + 0.15);
-    } catch (e) {
-      console.log("AudioContext blocked:", e);
-    }
-  };
-
-  // Manual snapshot capture
-  const handleManualCapture = () => {
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-    
-    let frameData: string | null = null;
-    if (isSimulatedCamera && canvas) {
-      frameData = canvas.toDataURL("image/jpeg", 0.8);
-    } else if (video && canvas) {
-      const ctx = canvas.getContext("2d");
-      ctx?.drawImage(video, 0, 0, canvas.width, canvas.height);
-      frameData = canvas.toDataURL("image/jpeg", 0.8);
-    }
-
-    if (frameData) {
-      const generatedId = `VIO-PUB-${Date.now().toString().slice(-6)}-${Math.random().toString(36).substring(2, 5).toUpperCase()}`;
-      setEditForm(prev => ({
-        ...prev,
-        violation_id: generatedId,
-        plate_text: prev.plate_text || ""
-      }));
-      setCapturedFrame(frameData);
-      setIsEditing(true);
-      setSubmitSuccess(null);
-      setSubmitError(null);
-    }
-  };
-
-  // Submit report to backend
-  const handleSubmitReport = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editForm.plate_text.trim()) {
-      setSubmitError("Please enter a valid License Plate number.");
+  const handleRecordButton = () => {
+    if (!cameraReady) {
+      startCamera();
       return;
     }
+    if (recordState === "idle") startRecording();
+    else if (recordState === "recording") pauseRecording();
+    else if (recordState === "paused") resumeRecording();
+  };
 
-    setIsSubmitting(true);
-    setSubmitSuccess(null);
-    setSubmitError(null);
+  const submitCard = async (card: MLCard) => {
+    setSubmitting(card.id);
+    const plate = card.plates[0] || "UNKNOWN";
+    const vtype = card.violations[0]?.type || "Unclassified";
+    const vid = card.violationId || `VIO-PUB-${Date.now().toString().slice(-6)}`;
 
     try {
-      const payload = {
-        violation_id: editForm.violation_id,
-        violation_type: editForm.violation_type,
-        plate_text: editForm.plate_text.toUpperCase().trim(),
-        location: editForm.location,
-        severity: editForm.severity,
-        frame_b64: capturedFrame
-      };
-
-      const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
-      const protocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "https" : "http";
-      const res = await fetch(`${protocol}://${host}:8000/api/v1/violations/public-report`, {
+      const res = await fetch(`${apiBase()}/api/v1/violations/public-report`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          violation_id: vid,
+          violation_type: vtype,
+          plate_text: plate,
+          location,
+          severity: card.severity === "high" ? "high" : "medium",
+          frame_b64: card.annotatedFrame,
+        }),
       });
-
       if (res.ok) {
-        setSubmitSuccess(`Report ${editForm.violation_id} submitted!`);
-        
-        const newLog: SubmissionLog = {
-          violation_id: editForm.violation_id,
-          violation_type: editForm.violation_type,
-          plate_text: editForm.plate_text.toUpperCase().trim(),
-          location: editForm.location,
+        const newSub: Submission = {
+          violation_id: vid,
+          violation_type: vtype,
+          plate_text: plate,
+          location,
           timestamp: new Date().toLocaleString(),
-          status: "pending"
+          status: "pending",
+          frame: card.annotatedFrame,
         };
-        
-        const updated = [newLog, ...submissions];
+        const updated = [newSub, ...submissions];
         setSubmissions(updated);
         localStorage.setItem("garuda_public_submissions", JSON.stringify(updated));
-        
-        // Auto-close form on successful submit
-        setIsEditing(false);
-        setCapturedFrame(null);
+        setSubmitResult({ id: card.id, ok: true });
       } else {
-        const errorData = await res.json();
-        setSubmitError(errorData.detail || "Failed to submit public report to central systems.");
+        setSubmitResult({ id: card.id, ok: false });
       }
-    } catch (err) {
-      setSubmitError("Connection to backend server failed. Make sure the API service is online.");
+    } catch {
+      setSubmitResult({ id: card.id, ok: false });
     } finally {
-      setIsSubmitting(false);
+      setSubmitting(null);
+      setTimeout(() => setSubmitResult(null), 3000);
     }
   };
 
+  const recordBtnLabel = () => {
+    if (!cameraReady) return { emoji: "📷", text: "Start Camera" };
+    if (recordState === "idle") return { emoji: "⏺", text: "Record" };
+    if (recordState === "recording") return { emoji: "⏸", text: "Pause" };
+    return { emoji: "▶", text: "Resume" };
+  };
+
+  const btn = recordBtnLabel();
+
   return (
-    <div style={{
-      width: "100vw",
-      height: "100vh",
-      position: "relative",
-      backgroundColor: "#000000",
-      fontFamily: "var(--font-sans)",
-      color: "#FFFFFF",
-      overflow: "hidden"
-    }}>
-      
+    <div style={{ width: "100vw", minHeight: "100vh", backgroundColor: "#060a12", color: "#fff", fontFamily: "system-ui, -apple-system, sans-serif", overflowX: "hidden" }}>
       <style dangerouslySetInnerHTML={{ __html: `
-        @media (max-width: 600px) {
-          .public-bottom-bar {
-            flex-direction: column !important;
-            gap: 16px !important;
-            align-items: center !important;
-            padding-bottom: 30px !important;
-            background: linear-gradient(to top, rgba(0,0,0,0.98) 0%, rgba(0,0,0,0.8) 70%, rgba(0,0,0,0) 100%) !important;
-          }
-          .public-right-controls {
-            align-items: center !important;
-            width: 100% !important;
-            flex-direction: row !important;
-            justify-content: center !important;
-            gap: 12px !important;
-          }
-          .public-right-controls select {
-            width: 50% !important;
-          }
-          .public-right-controls button {
-            width: 50% !important;
-          }
-          .public-form-grid {
-            grid-template-columns: 1fr !important;
-            gap: 12px !important;
-          }
+        * { box-sizing: border-box; }
+        body { margin: 0; }
+        .tab-btn { background: none; border: none; cursor: pointer; padding: 10px 0; font-size: 12px; font-weight: 700; letter-spacing: 0.5px; flex: 1; transition: all 0.15s; }
+        .tab-btn.active { color: #facc15; border-bottom: 2px solid #facc15; }
+        .tab-btn.inactive { color: #64748b; border-bottom: 2px solid transparent; }
+        .record-btn { border: none; cursor: pointer; border-radius: 50px; font-weight: 800; font-size: 15px; letter-spacing: 0.5px; transition: all 0.15s; }
+        .record-btn:active { transform: scale(0.95); }
+        .card { background: #0f1623; border: 1px solid rgba(255,255,255,0.07); border-radius: 12px; overflow: hidden; margin-bottom: 12px; }
+        .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 20px; font-size: 10px; font-weight: 700; }
+        .badge-red { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
+        .badge-yellow { background: rgba(250,204,21,0.15); color: #facc15; border: 1px solid rgba(250,204,21,0.3); }
+        .badge-green { background: rgba(34,197,94,0.15); color: #4ade80; border: 1px solid rgba(34,197,94,0.3); }
+        .badge-gray { background: rgba(100,116,139,0.15); color: #94a3b8; border: 1px solid rgba(100,116,139,0.3); }
+        .submit-btn { background: #facc15; color: #000; border: none; border-radius: 6px; padding: 8px 14px; font-size: 11px; font-weight: 800; cursor: pointer; white-space: nowrap; }
+        .submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .submit-btn:active { transform: scale(0.97); }
+        @keyframes pulse-rec { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .rec-dot { animation: pulse-rec 1s infinite; display: inline-block; width: 8px; height: 8px; background: #ef4444; border-radius: 50%; }
+        @media (max-width: 480px) {
+          .cam-container { max-width: 100% !important; }
         }
       `}} />
-      
-      {/* Hidden processing canvas */}
-      <canvas ref={canvasRef} width={640} height={480} style={{ display: "none" }} />
 
-      {activeTab === "report" ? (
-        /* ==================== IMMERSIVE FULL SCREEN VIEWPORT ==================== */
-        <div style={{ width: "100%", height: "100%", position: "relative" }}>
-          
-          {/* Warning strobe pulse overlay */}
-          {violationAlertActive && (
-            <div style={{
-              position: "absolute",
-              inset: 0,
-              backgroundColor: "rgba(239, 68, 68, 0.3)",
-              animation: "pulse 0.4s infinite alternate",
-              zIndex: 8,
-              pointerEvents: "none"
-            }} />
+      {/* Hidden canvas for frame capture */}
+      <canvas ref={canvasRef} width={640} height={360} style={{ display: "none" }} />
+
+      {/* ── TOP HEADER ── */}
+      <div style={{ padding: "14px 16px 0", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 800, color: "#facc15", letterSpacing: 2 }}>GARUDA</div>
+          <div style={{ fontSize: 9, color: "#475569", letterSpacing: 1 }}>PUBLIC REPORTER</div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {recordState === "recording" && (
+            <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, color: "#ef4444", fontWeight: 700 }}>
+              <span className="rec-dot" /> LIVE
+            </span>
           )}
+          {cameraReady && recordState === "idle" && (
+            <span className="badge badge-green" style={{ fontSize: 9 }}>● READY</span>
+          )}
+        </div>
+      </div>
 
-          {/* Native HTML5 Video Element */}
-          <video 
-            ref={videoRef}
-            playsInline
-            muted
+      {/* ── TAB BAR ── */}
+      <div style={{ display: "flex", borderBottom: "1px solid rgba(255,255,255,0.06)", margin: "12px 0 0" }}>
+        <button className={`tab-btn ${tab === "record" ? "active" : "inactive"}`} onClick={() => setTab("record")}>
+          📹 RECORD
+        </button>
+        <button
+          className={`tab-btn ${tab === "analyze" ? "active" : "inactive"}`}
+          onClick={() => { setTab("analyze"); setNewAnalyzeCount(0); }}
+        >
+          🔍 ANALYZE{newAnalyzeCount > 0 ? ` (${newAnalyzeCount})` : ""}
+        </button>
+        <button className={`tab-btn ${tab === "status" ? "active" : "inactive"}`} onClick={() => { setTab("status"); loadSubmissions(); }}>
+          📋 STATUS{submissions.length > 0 ? ` (${submissions.length})` : ""}
+        </button>
+      </div>
+
+      {/* ══════════════════════════════════ TAB: RECORD ══════════════════════════════════ */}
+      {tab === "record" && (
+        <div style={{ padding: "16px 12px", display: "flex", flexDirection: "column", gap: 14 }}>
+
+          {/* Camera Preview — natural aspect ratio, not fullscreen */}
+          <div
+            className="cam-container"
             style={{
               width: "100%",
-              height: "100%",
-              objectFit: "cover",
-              position: "absolute",
-              inset: 0,
-              zIndex: 1,
-              display: annotatedFrame ? "none" : "block"
+              maxWidth: 500,
+              margin: "0 auto",
+              aspectRatio: "16/9",
+              backgroundColor: "#000",
+              borderRadius: 12,
+              overflow: "hidden",
+              position: "relative",
+              border: recordState === "recording"
+                ? "2px solid #ef4444"
+                : cameraReady
+                ? "2px solid rgba(250,204,21,0.3)"
+                : "2px solid rgba(255,255,255,0.08)",
             }}
-          />
-
-          {/* AI Annotated Return Stream Frame */}
-          {annotatedFrame && (
-            <img 
-              src={annotatedFrame} 
-              alt="AI Camera View" 
-              style={{
-                width: "100%",
-                height: "100%",
-                objectFit: "cover",
-                position: "absolute",
-                inset: 0,
-                zIndex: 2,
-                display: "block"
-              }}
+          >
+            <video
+              ref={videoRef}
+              playsInline
+              muted
+              autoPlay={false}
+              style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#000" }}
             />
-          )}
 
-          {/* HUD OVERLAY - TOP PANEL */}
-          <div style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            right: 0,
-            background: "linear-gradient(to bottom, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.0) 100%)",
-            padding: "20px 16px",
-            zIndex: 10,
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center"
-          }}>
-            <div>
-              <h2 style={{ fontSize: "14px", fontWeight: "800", letterSpacing: "1px", margin: 0, color: "var(--border-accent-dark)" }}>
-                GARUDA EDGE REPORTER
-              </h2>
-              <p style={{ fontSize: "9px", opacity: 0.8, margin: 0, textTransform: "uppercase", fontFamily: "var(--font-mono)" }}>
-                Active: {cameraLabel}
-              </p>
-            </div>
-            
-            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-              <span style={{
-                fontSize: "9px",
-                backgroundColor: "rgba(22, 163, 74, 0.25)",
-                color: "#4ADE80",
-                border: "1px solid #22C55E",
-                padding: "3px 8px",
-                borderRadius: "12px",
-                fontWeight: "700",
-                display: "flex",
-                alignItems: "center",
-                gap: "4px"
-              }}>
-                <span className="pulse-green" style={{ width: "6px", height: "6px", backgroundColor: "#22C55E", borderRadius: "50%" }}></span>
-                REAL-TIME AI
-              </span>
-            </div>
-          </div>
+            {!cameraReady && !cameraError && (
+              <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, color: "#475569" }}>
+                <span style={{ fontSize: 36 }}>📷</span>
+                <span style={{ fontSize: 11, fontWeight: 600 }}>Tap "Record" to activate camera</span>
+              </div>
+            )}
 
-          {/* FLOATING ACTION CONTROL BAR - BOTTOM */}
-          <div className="public-bottom-bar" style={{
-            position: "absolute",
-            bottom: 0,
-            left: 0,
-            right: 0,
-            background: "linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.4) 60%, rgba(0,0,0,0.0) 100%)",
-            padding: "24px 16px 40px 16px",
-            zIndex: 10,
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center"
-          }}>
-            
-            {/* Left: View Log Button */}
-            <button 
-              onClick={() => {
-                setActiveTab("submissions");
-                loadSubmissions();
-              }}
-              style={{
-                background: "rgba(15, 23, 42, 0.85)",
-                border: "1px solid rgba(255,255,255,0.15)",
-                borderRadius: "50%",
-                width: "48px",
-                height: "48px",
-                cursor: "pointer",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexDirection: "column",
-                gap: "2px",
-                transition: "transform 0.1s"
-              }}
-            >
-              <span style={{ fontSize: "16px" }}>📋</span>
-              <span style={{ fontSize: "7px", fontWeight: "700" }}>LOGS ({submissions.length})</span>
-            </button>
-
-            {/* Center: BIG Floating Capture Button */}
-            <button 
-              onClick={handleManualCapture}
-              style={{
-                width: "76px",
-                height: "76px",
-                borderRadius: "50%",
-                backgroundColor: "#FFFFFF",
-                border: "6px solid var(--border-accent-dark)",
-                cursor: "pointer",
-                boxShadow: "0 10px 25px rgba(0,0,0,0.4)",
-                outline: "none",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                transform: "scale(1)",
-                transition: "transform 0.1s, background-color 0.1s"
-              }}
-              onMouseDown={(e) => e.currentTarget.style.transform = "scale(0.92)"}
-              onMouseUp={(e) => e.currentTarget.style.transform = "scale(1)"}
-            >
-              <div style={{
-                width: "44px",
-                height: "44px",
-                borderRadius: "50%",
-                backgroundColor: "var(--border-accent-dark)"
-              }} />
-            </button>
-
-            {/* Right: Camera Hardware Selector & Simulation Options */}
-            <div className="public-right-controls" style={{ display: "flex", flexDirection: "column", gap: "8px", alignItems: "flex-end" }}>
-              
-              {devices.length > 1 && (
-                <select
-                  value={selectedDeviceId}
-                  onChange={(e) => {
-                    setIsSimulatedCamera(false);
-                    setSelectedDeviceId(e.target.value);
-                  }}
-                  disabled={isSimulatedCamera}
-                  style={{
-                    background: "rgba(15, 23, 42, 0.85)",
-                    border: "1px solid rgba(255,255,255,0.2)",
-                    borderRadius: "4px",
-                    padding: "4px 8px",
-                    fontSize: "10px",
-                    color: "#FFF",
-                    outline: "none"
-                  }}
-                >
-                  {devices.map((d, i) => (
-                    <option key={d.deviceId} value={d.deviceId} style={{ color: "#000" }}>
-                      {d.label ? `Cam: ${d.label.slice(0, 12)}...` : `Camera ${i+1}`}
-                    </option>
-                  ))}
-                </select>
-              )}
-
-              <button 
-                onClick={() => setIsSimulatedCamera(!isSimulatedCamera)}
-                style={{
-                  background: isSimulatedCamera ? "var(--border-accent-dark)" : "rgba(15, 23, 42, 0.85)",
-                  color: isSimulatedCamera ? "#000000" : "#FFFFFF",
-                  border: "1px solid rgba(255,255,255,0.2)",
-                  borderRadius: "4px",
-                  padding: "4px 8px",
-                  fontSize: "10px",
-                  fontWeight: "bold",
-                  cursor: "pointer"
-                }}
-              >
-                {isSimulatedCamera ? "USING RADAR EMULATION" : "USE RADAR SIM FALLBACK"}
-              </button>
-
-            </div>
-          </div>
-
-          {/* Quick Success Toast */}
-          {submitSuccess && (
-            <div style={{
-              position: "absolute",
-              top: "90px",
-              left: "50%",
-              transform: "translateX(-50%)",
-              backgroundColor: "rgba(22, 163, 74, 0.95)",
-              color: "#FFF",
-              padding: "8px 16px",
-              borderRadius: "20px",
-              fontSize: "11px",
-              fontWeight: "bold",
-              zIndex: 100,
-              boxShadow: "0 4px 12px rgba(0,0,0,0.35)",
-              animation: "fadeIn 0.3s ease-out"
-            }}>
-              ✓ {submitSuccess}
-            </div>
-          )}
-
-          {/* ==================== SLIDE-UP BOTTOM SHEET EDIT PANEL ==================== */}
-          {isEditing && capturedFrame && (
-            <div style={{
-              position: "absolute",
-              bottom: 0,
-              left: 0,
-              right: 0,
-              backgroundColor: "rgba(15, 23, 42, 0.96)",
-              backdropFilter: "blur(8px)",
-              color: "#FFFFFF",
-              borderTop: "3px solid var(--border-accent-dark)",
-              borderTopLeftRadius: "16px",
-              borderTopRightRadius: "16px",
-              padding: "20px 16px 32px 16px",
-              zIndex: 50,
-              boxShadow: "0 -8px 30px rgba(0,0,0,0.5)",
-              maxHeight: "82vh",
-              overflowY: "auto",
-              display: "flex",
-              flexDirection: "column",
-              gap: "14px"
-            }}>
-              
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                <div>
-                  <h3 style={{ fontSize: "13px", fontWeight: "800", color: "var(--border-accent-dark)", margin: 0 }}>
-                    VERIFY EVIDENCE CITATION
-                  </h3>
-                  <p style={{ fontSize: "9px", color: "#94A3B8", margin: "2px 0 0 0" }}>
-                    Confirm the license plate text and category matching the captured frame.
-                  </p>
-                </div>
-                <button 
-                  onClick={() => {
-                    setIsEditing(false);
-                    setCapturedFrame(null);
-                  }}
-                  style={{
-                    background: "none",
-                    border: "none",
-                    color: "#94A3B8",
-                    fontSize: "16px",
-                    fontWeight: "bold",
-                    cursor: "pointer",
-                    padding: "4px"
-                  }}
-                >
-                  ✕
+            {cameraError && (
+              <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 16, textAlign: "center" }}>
+                <span style={{ fontSize: 28 }}>⚠️</span>
+                <span style={{ fontSize: 11, color: "#f87171", fontWeight: 600 }}>Camera Error</span>
+                <span style={{ fontSize: 10, color: "#64748b" }}>{cameraError}</span>
+                <button onClick={() => startCamera()} style={{ marginTop: 8, background: "#facc15", color: "#000", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                  Retry
                 </button>
               </div>
+            )}
 
-              {/* Form Grid */}
-              <form onSubmit={handleSubmitReport} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                
-                {/* Snapshot display crop */}
-                <div style={{
-                  width: "100%",
-                  height: "130px",
-                  borderRadius: "6px",
-                  overflow: "hidden",
-                  backgroundColor: "#000",
-                  border: "1px solid rgba(255,255,255,0.1)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center"
-                }}>
-                  <img src={capturedFrame} alt="Snapshot crop" style={{ height: "100%", objectFit: "contain" }} />
-                </div>
+            {/* Camera label overlay */}
+            {cameraReady && (
+              <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "linear-gradient(to top, rgba(0,0,0,0.7), transparent)", padding: "12px 10px 6px", fontSize: 9, color: "#94a3b8" }}>
+                {cameraLabel}
+              </div>
+            )}
+          </div>
 
-                <div className="public-form-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
-                  
-                  <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
-                    <label style={{ fontSize: "8px", fontWeight: "bold", color: "#94A3B8" }}>
-                      DETECTED LICENSE PLATE *
-                    </label>
-                    <input 
-                      type="text"
-                      value={editForm.plate_text}
-                      onChange={(e) => setEditForm({ ...editForm, plate_text: e.target.value.toUpperCase() })}
-                      required
-                      placeholder="ENTER REG NUMBER"
-                      style={{
-                        padding: "8px",
-                        border: "2px solid var(--border-accent-dark)",
-                        borderRadius: "4px",
-                        fontSize: "12px",
-                        color: "#FFFFFF",
-                        backgroundColor: "#1E293B",
-                        fontFamily: "var(--font-mono)",
-                        fontWeight: "bold",
-                        outline: "none"
-                      }}
-                    />
-                  </div>
+          {/* Location input */}
+          <div style={{ maxWidth: 500, margin: "0 auto", width: "100%" }}>
+            <label style={{ fontSize: 9, color: "#64748b", fontWeight: 700, letterSpacing: 1 }}>LOCATION TAG</label>
+            <input
+              value={location}
+              onChange={(e) => setLocation(e.target.value)}
+              placeholder="e.g. MG Road Junction"
+              style={{ display: "block", width: "100%", marginTop: 4, padding: "8px 10px", background: "#0f1623", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, color: "#fff", fontSize: 12, outline: "none" }}
+            />
+          </div>
 
-                  <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
-                    <label style={{ fontSize: "8px", fontWeight: "bold", color: "#94A3B8" }}>
-                      VIOLATION CATEGORY
-                    </label>
-                    <select
-                      value={editForm.violation_type}
-                      onChange={(e) => setEditForm({ ...editForm, violation_type: e.target.value })}
-                      style={{
-                        padding: "8px",
-                        border: "1px solid rgba(255,255,255,0.2)",
-                        borderRadius: "4px",
-                        fontSize: "12px",
-                        color: "#FFFFFF",
-                        backgroundColor: "#1E293B",
-                        outline: "none"
-                      }}
-                    >
-                      <option value="No Helmet">No Helmet (Rider)</option>
-                      <option value="Speeding">Speeding Violation</option>
-                      <option value="Seatbelt">Seatbelt Non-Compliance</option>
-                      <option value="Red Light">Red Light Run-through</option>
-                      <option value="Wrong Way">Wrong Way Driving</option>
-                      <option value="Illegal Parking">Illegal Parking / Obstruction</option>
-                    </select>
-                  </div>
-
-                  <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
-                    <label style={{ fontSize: "8px", fontWeight: "bold", color: "#94A3B8" }}>
-                      SEVERITY LEVEL
-                    </label>
-                    <select
-                      value={editForm.severity}
-                      onChange={(e) => setEditForm({ ...editForm, severity: e.target.value })}
-                      style={{
-                        padding: "8px",
-                        border: "1px solid rgba(255,255,255,0.2)",
-                        borderRadius: "4px",
-                        fontSize: "12px",
-                        color: "#FFFFFF",
-                        backgroundColor: "#1E293B",
-                        outline: "none"
-                      }}
-                    >
-                      <option value="low">Low Severity</option>
-                      <option value="medium">Medium Severity</option>
-                      <option value="high">High Severity</option>
-                    </select>
-                  </div>
-
-                  <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
-                    <label style={{ fontSize: "8px", fontWeight: "bold", color: "#94A3B8" }}>
-                      CAMERA LOCATION
-                    </label>
-                    <input 
-                      type="text"
-                      value={editForm.location}
-                      onChange={(e) => setEditForm({ ...editForm, location: e.target.value })}
-                      style={{
-                        padding: "8px",
-                        border: "1px solid rgba(255,255,255,0.2)",
-                        borderRadius: "4px",
-                        fontSize: "12px",
-                        color: "#FFFFFF",
-                        backgroundColor: "#1E293B",
-                        outline: "none"
-                      }}
-                    />
-                  </div>
-
-                </div>
-
-                {submitError && (
-                  <div style={{
-                    backgroundColor: "rgba(239, 68, 68, 0.2)",
-                    border: "1px solid rgba(239, 68, 68, 0.4)",
-                    color: "#FCA5A5",
-                    padding: "8px",
-                    borderRadius: "4px",
-                    fontSize: "10px"
-                  }}>
-                    {submitError}
-                  </div>
-                )}
-
-                <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
-                  <button 
-                    type="submit"
-                    disabled={isSubmitting}
-                    style={{
-                      flex: 1,
-                      padding: "10px",
-                      backgroundColor: "var(--border-accent-dark)",
-                      color: "#000000",
-                      border: "none",
-                      borderRadius: "4px",
-                      fontWeight: "800",
-                      fontSize: "11px",
-                      cursor: isSubmitting ? "not-allowed" : "pointer"
-                    }}
-                  >
-                    {isSubmitting ? "TRANSMITTING CITATION..." : "DISPATCH CITATION EVIDENCE"}
-                  </button>
-                </div>
-
-              </form>
-
+          {/* Camera switcher */}
+          {devices.length > 1 && (
+            <div style={{ maxWidth: 500, margin: "0 auto", width: "100%" }}>
+              <label style={{ fontSize: 9, color: "#64748b", fontWeight: 700, letterSpacing: 1 }}>CAMERA</label>
+              <select
+                value={selectedDeviceId}
+                onChange={(e) => setSelectedDeviceId(e.target.value)}
+                style={{ display: "block", width: "100%", marginTop: 4, padding: "8px 10px", background: "#0f1623", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, color: "#fff", fontSize: 11, outline: "none" }}
+              >
+                {devices.map((d, i) => (
+                  <option key={d.deviceId} value={d.deviceId} style={{ color: "#000" }}>
+                    {d.label || `Camera ${i + 1}`}
+                  </option>
+                ))}
+              </select>
             </div>
           )}
 
-        </div>
-      ) : (
-        /* ==================== SLEEK DARK SUBMISSIONS VIEW ==================== */
-        <div style={{
-          width: "100%",
-          height: "100%",
-          backgroundColor: "#090D16",
-          padding: "24px 16px",
-          display: "flex",
-          flexDirection: "column",
-          gap: "16px",
-          overflowY: "auto"
-        }}>
-          
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div>
-              <h2 style={{ fontSize: "14px", fontWeight: "800", color: "var(--border-accent-dark)", margin: 0 }}>
-                SUBMITTED CITATION INDEX
-              </h2>
-              <p style={{ fontSize: "9px", color: "#94A3B8", margin: "2px 0 0 0" }}>
-                Roster of public captures logged in local browser memory.
-              </p>
-            </div>
-            
-            <button 
-              onClick={() => setActiveTab("report")}
+          {/* Record / Pause / Resume button */}
+          <div style={{ display: "flex", gap: 10, maxWidth: 500, margin: "0 auto", width: "100%" }}>
+            <button
+              className="record-btn"
+              onClick={handleRecordButton}
               style={{
-                padding: "6px 12px",
-                backgroundColor: "rgba(255,255,255,0.1)",
-                color: "#FFFFFF",
-                border: "none",
-                borderRadius: "4px",
-                fontWeight: "bold",
-                fontSize: "10px",
-                cursor: "pointer"
+                flex: 1,
+                padding: "14px",
+                background: recordState === "recording"
+                  ? "#ef4444"
+                  : recordState === "paused"
+                  ? "#f59e0b"
+                  : "#facc15",
+                color: "#000",
               }}
             >
-              📹 CAMERA STREAM
+              {btn.emoji} {btn.text}
+            </button>
+
+            {(recordState === "recording" || recordState === "paused") && (
+              <button
+                className="record-btn"
+                onClick={stopStream}
+                style={{ padding: "14px 20px", background: "rgba(255,255,255,0.08)", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" }}
+              >
+                ■ Stop
+              </button>
+            )}
+          </div>
+
+          {/* Info box */}
+          <div style={{ maxWidth: 500, margin: "0 auto", width: "100%", background: "rgba(250,204,21,0.05)", border: "1px solid rgba(250,204,21,0.15)", borderRadius: 8, padding: "10px 12px" }}>
+            <div style={{ fontSize: 10, color: "#94a3b8", lineHeight: 1.6 }}>
+              ① Tap <strong style={{ color: "#facc15" }}>Record</strong> to start live ML analysis.<br />
+              ② ML detects violations, faces &amp; plates in real time.<br />
+              ③ Go to <strong style={{ color: "#facc15" }}>Analyze</strong> tab to review &amp; submit evidence.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════ TAB: ANALYZE ══════════════════════════════════ */}
+      {tab === "analyze" && (
+        <div style={{ padding: "16px 12px", display: "flex", flexDirection: "column", gap: 12 }}>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#facc15" }}>ML EVIDENCE CARDS</div>
+              <div style={{ fontSize: 9, color: "#475569", marginTop: 2 }}>{mlCards.length} frames analyzed</div>
+            </div>
+            {mlCards.length > 0 && (
+              <button onClick={() => setMlCards([])} style={{ background: "none", border: "1px solid rgba(255,255,255,0.1)", color: "#64748b", borderRadius: 6, padding: "5px 10px", fontSize: 10, cursor: "pointer" }}>
+                Clear
+              </button>
+            )}
+          </div>
+
+          {mlCards.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "60px 20px", color: "#334155" }}>
+              <div style={{ fontSize: 40, marginBottom: 10 }}>🔍</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#475569" }}>No ML results yet</div>
+              <div style={{ fontSize: 10, color: "#334155", marginTop: 4 }}>Start recording to begin live analysis</div>
+              <button onClick={() => setTab("record")} style={{ marginTop: 14, background: "#facc15", color: "#000", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
+                Go to Record
+              </button>
+            </div>
+          ) : (
+            mlCards.map((card) => (
+              <div key={card.id} className="card">
+                {/* Annotated frame */}
+                <div style={{ width: "100%", aspectRatio: "16/9", background: "#000", overflow: "hidden" }}>
+                  <img src={card.annotatedFrame} alt="ML annotated" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
+                </div>
+
+                {/* Card body */}
+                <div style={{ padding: "12px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                    <div style={{ fontSize: 10, color: "#475569" }}>{card.timestamp}</div>
+                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                      {card.violations.length > 0 && (
+                        <span className="badge badge-red">⚠ {card.violations[0].type}</span>
+                      )}
+                      {card.violations.length === 0 && card.vehicles > 0 && (
+                        <span className="badge badge-green">✓ No Violation</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Detection grid */}
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
+                    <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: 6, padding: "8px 6px", textAlign: "center" }}>
+                      <div style={{ fontSize: 18, fontWeight: 800, color: "#facc15" }}>{card.vehicles}</div>
+                      <div style={{ fontSize: 9, color: "#475569", marginTop: 2 }}>VEHICLES</div>
+                    </div>
+                    <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: 6, padding: "8px 6px", textAlign: "center" }}>
+                      <div style={{ fontSize: 18, fontWeight: 800, color: "#60a5fa" }}>{card.persons}</div>
+                      <div style={{ fontSize: 9, color: "#475569", marginTop: 2 }}>PERSONS</div>
+                    </div>
+                    <div style={{ background: "rgba(255,255,255,0.04)", borderRadius: 6, padding: "8px 6px", textAlign: "center" }}>
+                      <div style={{ fontSize: 18, fontWeight: 800, color: card.plates.length > 0 ? "#4ade80" : "#334155" }}>
+                        {card.plates.length > 0 ? "✓" : "—"}
+                      </div>
+                      <div style={{ fontSize: 9, color: "#475569", marginTop: 2 }}>PLATE</div>
+                    </div>
+                  </div>
+
+                  {/* Plate & violation details */}
+                  {card.plates.length > 0 && (
+                    <div style={{ background: "#0a0f1a", borderRadius: 6, padding: "6px 10px", marginBottom: 8, fontFamily: "monospace", fontSize: 14, fontWeight: 800, color: "#facc15", letterSpacing: 2 }}>
+                      {card.plates[0]}
+                    </div>
+                  )}
+
+                  {card.violations.map((v, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, color: "#e2e8f0", marginBottom: 4 }}>
+                      <span>🚨 {v.type}</span>
+                      <span style={{ color: "#94a3b8", fontSize: 10 }}>{v.confidence.toFixed(1)}% conf</span>
+                    </div>
+                  ))}
+
+                  {/* Submit button */}
+                  {card.violations.length > 0 && (
+                    <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
+                      <button
+                        className="submit-btn"
+                        disabled={submitting === card.id}
+                        onClick={() => submitCard(card)}
+                        style={{ flex: 1 }}
+                      >
+                        {submitting === card.id ? "Submitting..." : "📤 Dispatch as Evidence"}
+                      </button>
+                      {submitResult?.id === card.id && (
+                        <span style={{ fontSize: 10, color: submitResult.ok ? "#4ade80" : "#f87171", fontWeight: 700 }}>
+                          {submitResult.ok ? "✓ Sent" : "✗ Failed"}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      {/* ══════════════════════════════════ TAB: STATUS ══════════════════════════════════ */}
+      {tab === "status" && (
+        <div style={{ padding: "16px 12px", display: "flex", flexDirection: "column", gap: 12 }}>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#facc15" }}>SUBMITTED EVIDENCE</div>
+              <div style={{ fontSize: 9, color: "#475569", marginTop: 2 }}>{submissions.length} reports filed</div>
+            </div>
+            <button onClick={loadSubmissions} style={{ background: "none", border: "1px solid rgba(255,255,255,0.1)", color: "#64748b", borderRadius: 6, padding: "5px 10px", fontSize: 10, cursor: "pointer" }}>
+              ↻ Refresh
             </button>
           </div>
 
           {submissions.length === 0 ? (
-            <div style={{
-              flex: 1,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              padding: "60px 10px",
-              color: "#64748B",
-              border: "1px dashed rgba(255,255,255,0.1)",
-              borderRadius: "8px",
-              marginTop: "20px"
-            }}>
-              <span style={{ fontSize: "32px", marginBottom: "8px" }}>📋</span>
-              <div style={{ fontWeight: "700", fontSize: "11px", color: "#94A3B8" }}>NO DISPATCHED SUBMISSIONS</div>
-              <p style={{ fontSize: "9px", margin: "2px 0 0 0", textAlign: "center" }}>
-                Navigate back to the camera stream to snap and send violations.
-              </p>
+            <div style={{ textAlign: "center", padding: "60px 20px", color: "#334155" }}>
+              <div style={{ fontSize: 40, marginBottom: 10 }}>📋</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#475569" }}>No submissions yet</div>
+              <div style={{ fontSize: 10, color: "#334155", marginTop: 4 }}>Submit violations from the Analyze tab</div>
             </div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-              {submissions.map((item, index) => (
-                <div key={index} style={{
-                  backgroundColor: "#111827",
-                  border: "1px solid rgba(255,255,255,0.06)",
-                  borderRadius: "6px",
-                  padding: "12px",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center"
-                }}>
-                  <div>
-                    <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                      <span style={{ fontFamily: "var(--font-mono)", fontWeight: "bold", fontSize: "12px", color: "#F3F4F6" }}>
-                        {item.plate_text}
-                      </span>
-                      <span style={{
-                        fontSize: "8px",
-                        backgroundColor: "rgba(234,179,8,0.15)",
-                        color: "var(--border-accent-dark)",
-                        padding: "1px 5px",
-                        borderRadius: "3px",
-                        fontWeight: "600",
-                        textTransform: "uppercase"
-                      }}>
-                        {item.violation_type}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: "9px", color: "#64748B", marginTop: "4px" }}>
-                      ID: {item.violation_id} • Ingested: {new Date(item.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                    </div>
-                  </div>
+            submissions.map((s, i) => {
+              const statusColor =
+                s.status === "confirmed" || s.status === "auto_challan"
+                  ? "#4ade80"
+                  : s.status === "rejected"
+                  ? "#f87171"
+                  : "#facc15";
+              const statusLabel =
+                s.status === "confirmed" || s.status === "auto_challan"
+                  ? "Verified ✓"
+                  : s.status === "rejected"
+                  ? "Rejected ✗"
+                  : "Pending Review";
 
-                  <div>
-                    <span className={`badge ${
-                      item.status === "confirmed" || item.status === "auto_challan"
-                        ? "approved"
-                        : item.status === "rejected"
-                        ? "rejected"
-                        : "review"
-                    }`} style={{ fontSize: "9px", padding: "3px 8px" }}>
-                      {item.status === "confirmed" || item.status === "auto_challan"
-                        ? "Verified"
-                        : item.status === "rejected"
-                        ? "Rejected"
-                        : "Review Queue"}
-                    </span>
+              return (
+                <div key={i} className="card" style={{ padding: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                        <span style={{ fontFamily: "monospace", fontWeight: 800, fontSize: 13, color: "#f3f4f6" }}>
+                          {s.plate_text || "NO PLATE"}
+                        </span>
+                        <span className="badge badge-yellow" style={{ fontSize: 9 }}>{s.violation_type}</span>
+                      </div>
+                      <div style={{ fontSize: 9, color: "#475569" }}>
+                        {s.violation_id} · {s.location}
+                      </div>
+                      <div style={{ fontSize: 9, color: "#334155", marginTop: 2 }}>{s.timestamp}</div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: statusColor }}>{statusLabel}</div>
+                    </div>
                   </div>
                 </div>
-              ))}
-            </div>
+              );
+            })
           )}
-
         </div>
       )}
 
+      {/* Bottom padding for safe area */}
+      <div style={{ height: 32 }} />
     </div>
   );
 }
