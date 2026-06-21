@@ -11,9 +11,8 @@ import {
   CameraIcon, 
   AlertIcon, 
   UploadIcon, 
-  ShieldIcon, 
-  SearchIcon, 
-  ChartIcon, 
+  ShieldIcon,
+  ChartIcon,
   SettingsIcon, 
   BellIcon,
   CloseIcon,
@@ -36,7 +35,8 @@ export default function LayoutShell({ children }: LayoutShellProps) {
     isAuthenticated,
     authLoading,
     user,
-    logout
+    logout,
+    isBackendConnected
   } = usePlatform();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -54,7 +54,6 @@ export default function LayoutShell({ children }: LayoutShellProps) {
     { name: "Violation Center", href: "/violations", icon: <AlertIcon size={16} /> },
     { name: "Review Queue", href: "/review", icon: <ShieldIcon size={16} /> },
     { name: "Evidence Upload", href: "/evidence", icon: <UploadIcon size={16} /> },
-    { name: "Global Search", href: "/search", icon: <SearchIcon size={16} /> },
     { name: "Analytics Center", href: "/analytics", icon: <ChartIcon size={16} /> },
     { name: "Administration", href: "/settings", icon: <SettingsIcon size={16} /> },
   ];
@@ -177,9 +176,9 @@ export default function LayoutShell({ children }: LayoutShellProps) {
                 <line x1="3" y1="18" x2="21" y2="18"></line>
               </svg>
             </button>
-            <div className="pulse-green"></div>
+            <div className={isBackendConnected ? "pulse-green" : "pulse-red"}></div>
             <div style={{ fontSize: "11px", fontWeight: "600", color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
-              Enforcement Network: Online
+              Enforcement Network: {isBackendConnected ? "Online" : "Offline"}
             </div>
           </div>
 

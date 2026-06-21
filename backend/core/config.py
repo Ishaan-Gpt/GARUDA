@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     OFFICER_PHONES: str = "+919999999999,+918888888888"
 
     # ML Pipeline settings
-    MODEL_PATH: str = ""               # Leave empty = auto-download yolo11n.pt
+    MODEL_PATH: str = ""               # Leave empty = use ml/models/weights/yolov8m.pt
     DEVICE: str = "cpu"                # "cpu" | "cuda:0" | "0"
     STOP_LINE_Y: int = 380             # Pixels — calibrate per camera
     CONFIDENCE_TIER1: float = 0.90

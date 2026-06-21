@@ -1,11 +1,12 @@
 "use client";
 
 import React, { useState, useMemo } from "react";
-import { usePlatform, Camera, Violation } from "@/context/PlatformContext";
-import { CameraIcon, AlertIcon, ShieldIcon, CheckIcon, CloseIcon, RefreshIcon } from "@/components/Icons";
+import { usePlatform } from "@/context/PlatformContext";
+import { CameraIcon, AlertIcon, CloseIcon, RefreshIcon } from "@/components/Icons";
+import { VIOLATION_TYPES, STATUS_LABELS, STATUS_BADGE_CLASS } from "@/lib/violations";
 
 export default function DashboardModule() {
-  const { cameras, violations } = usePlatform();
+  const { cameras, violations, isBackendConnected } = usePlatform();
 
   // Filters State
   const [filterCamera, setFilterCamera] = useState("all");
@@ -58,9 +59,9 @@ export default function DashboardModule() {
     const todayStr = new Date().toDateString();
     const todayVios = violations.filter(v => new Date(v.timestamp).toDateString() === todayStr).length;
     
-    const pendingReviews = violations.filter(v => v.status === "Detected" || v.status === "Under Review").length;
-    const confirmed = violations.filter(v => v.status === "Approved").length;
-    const falsePositives = violations.filter(v => v.status === "Rejected").length;
+    const pendingReviews = violations.filter(v => v.status === "pending").length;
+    const confirmed = violations.filter(v => v.status === "confirmed" || v.status === "auto_challan").length;
+    const falsePositives = violations.filter(v => v.status === "rejected").length;
 
     // Avg confidence calculation
     const confVios = filteredViolations.filter(v => v.confidenceScore > 0);
@@ -68,8 +69,7 @@ export default function DashboardModule() {
       ? (confVios.reduce((acc, curr) => acc + curr.confidenceScore, 0) / confVios.length).toFixed(1)
       : "0.0";
 
-    // Throughput calculation (simulated: violations per minute based on recent violations frequency)
-    const activeSeconds = 120; // past 2 minutes
+    // Throughput: real violations per minute, counted over the trailing 2-minute window
     const recentCount = violations.filter(v => Date.now() - new Date(v.timestamp).getTime() < 120000).length;
     const throughput = (recentCount / 2).toFixed(1); // events per minute
 
@@ -110,7 +110,7 @@ export default function DashboardModule() {
           <span className="metric-title">Active Streams</span>
           <span className="metric-value" style={{ color: "var(--success)" }}>{stats.activeStreams}</span>
           <span className="metric-footer">
-            <span className="pulse-green"></span> 30 FPS Stream Grid
+            <span className="pulse-green"></span> Registered Stream Grid
           </span>
         </div>
 
@@ -207,11 +207,9 @@ export default function DashboardModule() {
               <label className="form-label">Violation Type</label>
               <select className="form-input" value={filterType} onChange={(e) => setFilterType(e.target.value)}>
                 <option value="all">All Types</option>
-                <option value="Red Light">Red Light</option>
-                <option value="Speeding">Speeding</option>
-                <option value="Wrong Way">Wrong Way</option>
-                <option value="Seatbelt">Seatbelt</option>
-                <option value="No Helmet">No Helmet</option>
+                {VIOLATION_TYPES.map(t => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
               </select>
             </div>
           </div>
@@ -225,9 +223,9 @@ export default function DashboardModule() {
             <div className="card-title">
               <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                 <CameraIcon size={14} style={{ color: "var(--text-accent)" }} />
-                <span>LIVE FEED OVERVIEWS (SIMULATED INFERENCE)</span>
+                <span>LIVE FEED OVERVIEWS {isBackendConnected ? "(EDGE INF Nom)" : "(SIMULATED FALLBACK)"}</span>
               </div>
-              <span className="brand-badge">WEB INTERACTION ACTIVE</span>
+              <span className="brand-badge">{isBackendConnected ? "TELEMETRY ACTIVE" : "STANDALONE MODE"}</span>
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "10px" }}>
@@ -252,7 +250,7 @@ export default function DashboardModule() {
                       {c.status === "Active" ? (
                         <>
                           <span className="pulse-green"></span>
-                          <span style={{ color: "#4ade80" }}>{c.fps} FPS</span>
+                          <span style={{ color: "#4ade80" }}>LIVE</span>
                         </>
                       ) : (
                         <>
@@ -334,8 +332,8 @@ export default function DashboardModule() {
                           {v.confidenceScore}%
                         </td>
                         <td>
-                          <span className={`badge ${v.status.toLowerCase().replace(" ", "")}`}>
-                            {v.status}
+                          <span className={`badge ${STATUS_BADGE_CLASS[v.status]}`}>
+                            {STATUS_LABELS[v.status]}
                           </span>
                         </td>
                       </tr>

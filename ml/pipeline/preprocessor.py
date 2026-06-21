@@ -35,14 +35,17 @@ class ImagePreprocessor:
     # Public API
     # ------------------------------------------------------------------
 
-    def preprocess(self, image: np.ndarray, enhance: bool = True) -> np.ndarray:
+    def preprocess(self, image: np.ndarray, enhance: bool = True, is_video: bool = False) -> np.ndarray:
         """
         Full preprocessing pipeline for inference.
+        Optimized to downscale before CLAHE/Denoise to save CPU cycles,
+        and bypass denoising completely for video or during daylight.
 
         Args:
             image: BGR image (OpenCV format)
             enhance: Apply quality enhancement (CLAHE + noise reduction).
                      Set False for speed-critical live video paths.
+            is_video: Skip denoising completely if true.
 
         Returns:
             Preprocessed BGR image (same size as input)
@@ -50,12 +53,40 @@ class ImagePreprocessor:
         if image is None or image.size == 0:
             raise ValueError("Empty image provided to preprocessor")
 
-        if enhance:
-            image = self._enhance_low_light(image)
-            image = self._reduce_noise(image)
+        orig_h, orig_w = image.shape[:2]
 
-        image = self._normalize_exposure(image)
-        return image
+        # Calculate average brightness to detect daylight
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        mean_brightness = float(np.mean(gray))
+
+        # Only denoise if: enhance is True, NOT video, and brightness is extremely low (< 60)
+        should_denoise = enhance and not is_video and (mean_brightness < 60)
+
+        # Downscale for enhancement if target size exceeded
+        downscaled = image
+        scale_factor = 1.0
+        max_dim = 640
+        if enhance and (orig_w > max_dim or orig_h > max_dim):
+            scale_factor = max_dim / max(orig_w, orig_h)
+            new_w = int(orig_w * scale_factor)
+            new_h = int(orig_h * scale_factor)
+            downscaled = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+        # Apply enhancements on the downscaled image
+        if enhance:
+            downscaled = self._enhance_low_light(downscaled)
+            if should_denoise:
+                downscaled = self._reduce_noise(downscaled)
+
+        downscaled = self._normalize_exposure(downscaled)
+
+        # Upscale back to original resolution if we downscaled
+        if scale_factor != 1.0:
+            processed = cv2.resize(downscaled, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+        else:
+            processed = downscaled
+
+        return processed
 
     def resize_for_model(self, image: np.ndarray,
                           size: Optional[Tuple[int, int]] = None) -> np.ndarray:

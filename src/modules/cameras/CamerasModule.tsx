@@ -5,7 +5,7 @@ import { usePlatform, Camera, CameraStatus } from "@/context/PlatformContext";
 import { CameraIcon, PlusIcon, CloseIcon, CheckIcon, RefreshIcon } from "@/components/Icons";
 
 export default function CamerasModule() {
-  const { cameras, role, addCamera, toggleCameraStatus, deleteCamera, testCameraConnection } = usePlatform();
+  const { cameras, role, addCamera, toggleCameraStatus, deleteCamera, testCameraConnection, isBackendConnected } = usePlatform();
 
   // Component states
   const [selectedCameraId, setSelectedCameraId] = useState<string>("CAM-101");
@@ -44,7 +44,6 @@ export default function CamerasModule() {
       rtspUrl: newRtsp,
       location: newLoc,
       status: "Active",
-      fps: 30,
       resolution: newRes
     });
     // Reset Form
@@ -106,7 +105,6 @@ export default function CamerasModule() {
                   <th>ID</th>
                   <th>Location Name / RTSP Stream</th>
                   <th>Status</th>
-                  <th>FPS</th>
                   <th>Resolution</th>
                   <th>Last Heartbeat</th>
                   <th style={{ textAlign: "right" }}>Actions</th>
@@ -135,8 +133,7 @@ export default function CamerasModule() {
                           {c.status}
                         </span>
                       </td>
-                      <td className="mono">{c.fps}</td>
-                      <td className="mono">{c.resolution}</td>
+                      <td className="mono">{c.resolution || "Unknown"}</td>
                       <td className="mono" style={{ fontSize: "10px" }}>
                         {c.status === "Active" 
                           ? new Date(c.lastHeartbeat).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) 
@@ -204,11 +201,10 @@ export default function CamerasModule() {
 
         {/* Right Preview and Config Pane */}
         <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-          
           {selectedCamera ? (
             <div className="card">
               <div className="card-title">
-                <span>FEED INSPECTOR: {selectedCamera.id}</span>
+                <span>FEED INSPECTOR: {selectedCamera.id} {isBackendConnected ? "(CCTV TELEMETRY ACTIVE)" : "(SIMULATED)"}</span>
                 <span style={{ fontFamily: "var(--font-mono)", fontSize: "10px" }}>{selectedCamera.resolution}</span>
               </div>
 

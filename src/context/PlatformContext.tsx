@@ -1,10 +1,17 @@
 "use client";
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from "react";
+import {
+  ViolationStatus,
+  PlateDetection,
+  DriverAlert,
+  ProcessingInfo,
+  normalizeConfidencePct,
+} from "@/lib/violations";
 
 // Definitions
 export type CameraStatus = "Active" | "Offline" | "Disabled";
-export type ViolationStatus = "Detected" | "Under Review" | "Approved" | "Rejected";
+export type { ViolationStatus };
 export type JobStatus = "Queued" | "Processing" | "Completed" | "Failed";
 export type UserRole = "Admin" | "Supervisor" | "Reviewer" | "Operator";
 
@@ -15,57 +22,66 @@ export interface Camera {
   location: string;
   status: CameraStatus;
   lastHeartbeat: string;
-  fps: number;
   resolution: string;
 }
 
-export interface BoundingBox {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-export interface EvidenceFrame {
-  timestamp: string;
-  vehicleBox: BoundingBox;
-  plateBox: BoundingBox;
-  speed?: number;
-  lightColor?: "Red" | "Yellow" | "Green";
-  vehicleSvgType: "sedan" | "suv" | "motorcycle" | "truck";
-  color: string;
-}
-
+// Mirrors backend/models/schemas.py ViolationResponse / ViolationDetailResponse
+// exactly. allPlates/driverAlerts/processing are only populated when the full
+// json_record is available (single-violation fetch, job-violations fetch) —
+// they are undefined, not fake, when only the list endpoint was used.
 export interface Violation {
   id: string;
-  type: string; // "Red Light", "Speeding", "Wrong Way", "Seatbelt", "No Helmet"
+  type: string;            // one of VIOLATION_TYPES — real display label
   timestamp: string;
-  location: string;
+  location: string;        // free-text source label: camera location, uploaded filename, or patrol/public source
   cameraId: string;
   vehicleType: string;
   plateNumber: string;
+  plateConfidence: number; // 0-100
   confidenceScore: number; // 0-100
+  severity: string;        // low | medium | high | critical
+  tier: number;            // 1 = auto-cleared, 2 = needs review, 3 = low priority
+  action: string;          // "PASSED" | "HUMAN_REVIEW" etc — raw backend action code
+  fineAmountInr: number;
   status: ViolationStatus;
-  reviewer?: string;
-  reviewedAt?: string;
-  actionReason?: string;
-  
-  // Custom interactive frames
-  beforeFrame: EvidenceFrame;
-  violationFrame: EvidenceFrame;
-  afterFrame: EvidenceFrame;
+  officerId?: string;
+  createdAt: string;
+  annotatedImg: string;    // path to the real annotated evidence JPEG
+  rawImg: string;          // path to the real raw frame JPEG
+
+  // Detail-only real fields (present after fetching json_record)
+  allPlatesDetected?: PlateDetection[];
+  driverAlerts?: DriverAlert[];
+  processing?: ProcessingInfo;
+  // Every individual violation clubbed into this one record (one image can
+  // carry several — helmet + triple riding on the same frame). Each can be
+  // approved/rejected independently via reviewViolationItem(). Length 1 for
+  // the common single-violation case.
+  violationItems?: ViolationItem[];
+}
+
+export interface ViolationItem {
+  type: string;
+  confidence: number; // 0-100
+  severity: string;
+  fineAmountInr: number;
+  bbox: number[];
+  tier: number;
+  reviewStatus: "pending" | "auto_confirmed" | "confirmed" | "rejected";
+  escalated?: boolean;
 }
 
 export interface ProcessingJob {
   id: string;
   name: string;
-  sourceType: "Image" | "Video";
+  sourceType: "Image" | "Video" | "Batch";
   uploadTime: string;
   duration: number; // seconds
   framesProcessed: number;
   violationsFound: number;
   status: JobStatus;
   progress: number; // 0 to 100
+  cameraId?: string | null; // registered camera this job was calibrated against, if any
 }
 
 export interface SystemNotification {
@@ -103,10 +119,23 @@ interface PlatformContextType {
   testCameraConnection: (id: string) => Promise<boolean>;
   deleteCamera: (id: string) => void;
   
-  addViolation: (violation: Violation) => void;
-  updateViolationStatus: (id: string, status: ViolationStatus, reviewer: string, reason?: string) => void;
-  
+  reviewViolation: (
+    id: string,
+    action: "Approved" | "Rejected" | "Escalated",
+    reviewer: string,
+    reason?: string,
+    correctedPlateText?: string,
+  ) => void;
+  reviewViolationItem: (
+    id: string,
+    itemIndex: number,
+    action: "Approved" | "Rejected" | "Escalated",
+    reviewer: string,
+    reason?: string,
+  ) => void;
+
   submitUploadJob: (name: string, type: "Image" | "Video", file?: File) => void;
+  fetchViolationDetail: (id: string) => Promise<Violation | null>;
   clearNotifications: () => void;
   markNotificationRead: (id: string) => void;
   
@@ -116,6 +145,7 @@ interface PlatformContextType {
   simulationInterval: number; // ms
   setSimulationInterval: (interval: number) => void;
   isBackendConnected: boolean;
+  isWsConnected: boolean;
 }
 
 const PlatformContext = createContext<PlatformContextType | undefined>(undefined);
@@ -152,6 +182,7 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [isSimulating, setIsSimulating] = useState(false);
   const [simulationInterval, setSimulationInterval] = useState(12000); 
   const [isBackendConnected, setIsBackendConnected] = useState(false);
+  const [isWsConnected, setIsWsConnected] = useState(false);
 
   const socketRef = useRef<WebSocket | null>(null);
 
@@ -183,40 +214,59 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       record = {};
     }
     
-    const beforeFrame = record.beforeFrame || {
-      timestamp: new Date(new Date(v.timestamp).getTime() - 1000).toISOString(),
-      vehicleBox: { x: 50, y: 120, w: 90, h: 55 },
-      plateBox: { x: 90, y: 155, w: 20, h: 10 },
-      lightColor: v.violation_type === "Red Light" ? "Green" : undefined,
-      speed: v.violation_type === "Speeding" ? 54 : undefined,
-      vehicleSvgType: v.vehicle_class?.toLowerCase().includes("motorcycle") ? "motorcycle" : "sedan",
-      color: "#3B82F6"
-    };
+    // status is always one of the 4 values the backend actually persists
+    // (backend/api/reviews.py / database.py) — no fictional intermediate states.
+    const status: ViolationStatus =
+      v.status === "confirmed" || v.status === "auto_challan" || v.status === "rejected"
+        ? v.status
+        : "pending";
 
-    const violationFrame = record.violationFrame || {
-      timestamp: v.timestamp,
-      vehicleBox: { x: 120, y: 100, w: 95, h: 58 },
-      plateBox: { x: 165, y: 138, w: 22, h: 11 },
-      lightColor: v.violation_type === "Red Light" ? "Red" : undefined,
-      speed: v.violation_type === "Speeding" ? 82 : undefined,
-      vehicleSvgType: v.vehicle_class?.toLowerCase().includes("motorcycle") ? "motorcycle" : "sedan",
-      color: "#3B82F6"
-    };
+    const allPlatesDetected = Array.isArray(record.all_plates_detected)
+      ? record.all_plates_detected.map((p: any) => ({
+          plateText: p.plate_text || "UNCLEAR",
+          confidence: normalizeConfidencePct(p.confidence || 0),
+          vehicleClass: p.vehicle_class || "unknown",
+          bbox: p.bbox || [],
+          ocrEngine: p.ocr_engine || "unknown",
+          state: p.state || "Unknown",
+          isValid: !!p.is_valid,
+        }))
+      : undefined;
 
-    const afterFrame = record.afterFrame || {
-      timestamp: new Date(new Date(v.timestamp).getTime() + 1000).toISOString(),
-      vehicleBox: { x: 220, y: 80, w: 90, h: 55 },
-      plateBox: { x: 260, y: 115, w: 20, h: 10 },
-      lightColor: v.violation_type === "Red Light" ? "Red" : undefined,
-      speed: v.violation_type === "Speeding" ? 84 : undefined,
-      vehicleSvgType: v.vehicle_class?.toLowerCase().includes("motorcycle") ? "motorcycle" : "sedan",
-      color: "#3B82F6"
-    };
+    const driverAlerts = Array.isArray(record.driver_state?.alerts)
+      ? record.driver_state.alerts.map((a: any) => ({
+          alertType: a.alert_type,
+          severity: a.severity,
+          action: a.action,
+          confidence: a.confidence,
+          trackId: a.track_id ?? null,
+          metadata: a.metadata || {},
+        }))
+      : undefined;
 
-    let status: ViolationStatus = "Detected";
-    if (v.status === "confirmed") status = "Approved";
-    else if (v.status === "rejected") status = "Rejected";
-    else if (v.status === "pending") status = "Under Review";
+    const processing = record.processing
+      ? {
+          inferenceDevice: record.processing.inference_device || "Unknown",
+          inferenceTimeMs: record.processing.inference_time_ms || 0,
+          model: record.processing.model || "Unknown",
+          ocrEngine: record.processing.ocr_engine || "Unknown",
+          vehiclesDetected: record.processing.vehicles_detected || 0,
+          personsDetected: record.processing.persons_detected || 0,
+        }
+      : undefined;
+
+    const violationItems: ViolationItem[] | undefined = Array.isArray(record.violations)
+      ? record.violations.map((rv: any) => ({
+          type: rv.type || "Unknown",
+          confidence: normalizeConfidencePct(rv.confidence || 0),
+          severity: rv.severity || "medium",
+          fineAmountInr: rv.fine_amount_inr || 0,
+          bbox: rv.bbox || [],
+          tier: rv.tier ?? 2,
+          reviewStatus: rv.review_status || "pending",
+          escalated: !!rv.escalated,
+        }))
+      : undefined;
 
     return {
       id: v.id,
@@ -224,15 +274,23 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       timestamp: v.timestamp,
       location: v.location,
       cameraId: v.camera_id,
-      vehicleType: v.vehicle_class || "Passenger Vehicle",
+      vehicleType: v.vehicle_class || "unknown",
       plateNumber: v.plate_text || "UNCLEAR",
-      confidenceScore: confidenceScore,
-      status: status,
-      reviewer: v.officer_id || undefined,
-      reviewedAt: v.created_at || undefined,
-      beforeFrame,
-      violationFrame,
-      afterFrame
+      plateConfidence: normalizeConfidencePct(v.plate_conf || 0),
+      confidenceScore,
+      severity: v.severity || "medium",
+      tier: v.tier ?? 2,
+      action: v.action || "",
+      fineAmountInr: v.fine_amount || 0,
+      status,
+      officerId: v.officer_id || undefined,
+      createdAt: v.created_at || v.timestamp,
+      annotatedImg: v.annotated_img || "",
+      rawImg: v.raw_img || "",
+      allPlatesDetected,
+      driverAlerts,
+      processing,
+      violationItems,
     };
   }, []);
 
@@ -249,12 +307,11 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           const mappedCams: Camera[] = camsData.map((c: any) => ({
             id: c.id,
             name: c.description || `Camera ${c.id}`,
-            rtspUrl: `rtsp://10.200.41.10/live/${c.id.toLowerCase()}`,
+            rtspUrl: c.rtsp_url || "",
             location: c.location,
             status: c.status === "active" ? "Active" : "Offline",
             lastHeartbeat: c.last_seen || new Date().toISOString(),
-            fps: c.status === "active" ? 30 : 0,
-            resolution: "1920x1080"
+            resolution: c.resolution || "Unknown"
           }));
           setCameras(mappedCams);
         }
@@ -283,7 +340,8 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           framesProcessed: j.frames_processed,
           violationsFound: j.violations_found,
           status: j.status,
-          progress: j.progress
+          progress: j.progress,
+          cameraId: j.camera_id ?? null,
         }));
         setJobs(mappedJobs);
       }
@@ -351,7 +409,7 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       ws.onopen = () => {
         console.log("WebSocket connected to GARUDA live feed.");
         socketRef.current = ws;
-        setIsBackendConnected(true);
+        setIsWsConnected(true);
         triggerNotification("System Alert", "Connected to live FastAPI WebSocket event feed", "low");
       };
 
@@ -368,10 +426,12 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               confidence: data.confidence,
               severity: data.severity || "medium",
               tier: data.tier,
-              action: "HUMAN_REVIEW",
+              action: data.tier === 1 ? "PASSED" : "HUMAN_REVIEW",
               plate_text: data.plate,
-              vehicle_class: "Passenger Vehicle",
-              status: "pending"
+              vehicle_class: "unknown",
+              annotated_img: data.annotated_image_url || "",
+              status: "pending",
+              created_at: data.timestamp,
             });
 
             setViolations(prev => {
@@ -393,7 +453,7 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       ws.onclose = () => {
         console.log("WebSocket connection closed. Retrying...");
         socketRef.current = null;
-        setIsBackendConnected(false);
+        setIsWsConnected(false);
         setTimeout(connectWS, 5000); // Reconnect loop
       };
 
@@ -522,7 +582,9 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           id: cam.id,
           location: cam.location,
           stop_line_y: 380,
-          description: cam.name
+          description: cam.name,
+          rtsp_url: cam.rtspUrl,
+          resolution: cam.resolution
         })
       });
     } catch (e) {
@@ -534,7 +596,6 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setCameras(prev => prev.map(c => c.id === id ? {
       ...c,
       status,
-      fps: status === "Active" ? 30 : 0,
       lastHeartbeat: new Date().toISOString()
     } : c));
     
@@ -596,40 +657,120 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     });
   }, [cameras, isBackendConnected, token]);
 
-  const addViolation = useCallback((vio: Violation) => {
-    setViolations(prev => [vio, ...prev]);
-  }, []);
+  // Real officer review action — calls POST /api/v1/reviews, the single
+  // backend endpoint that correctly handles all three actions (the older
+  // /violations/{id}/confirm|reject pair has no "escalate" path, so routing
+  // "Escalated" through it would silently reject the violation instead).
+  const reviewViolation = useCallback(async (
+    id: string,
+    action: "Approved" | "Rejected" | "Escalated",
+    reviewer: string,
+    reason?: string,
+    correctedPlateText?: string,
+  ) => {
+    const newStatus: ViolationStatus =
+      action === "Approved" ? "confirmed" : action === "Rejected" ? "rejected" : "pending";
 
-  const updateViolationStatus = useCallback(async (id: string, status: ViolationStatus, reviewer: string, reason?: string) => {
     setViolations(prev => prev.map(v => v.id === id ? {
       ...v,
-      status,
-      reviewer,
-      reviewedAt: new Date().toISOString(),
-      actionReason: reason
+      status: newStatus,
+      officerId: reviewer,
+      plateNumber: correctedPlateText ? correctedPlateText.toUpperCase() : v.plateNumber,
     } : v));
-    
-    triggerNotification("System Alert", `Violation ${id} was ${status.toLowerCase()} by ${reviewer}.`, "low");
 
-    const headers: HeadersInit = token ? { 
-      "Content-Type": "application/json", 
-      "Authorization": `Bearer ${token}` 
+    triggerNotification("System Alert", `Violation ${id} was ${action.toLowerCase()} by ${reviewer}.`, "low");
+
+    const headers: HeadersInit = token ? {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`
     } : { "Content-Type": "application/json" };
 
     try {
-      const endpoint = status === "Approved" ? "confirm" : "reject";
-      await fetch(`${API_BASE}/violations/${id}/${endpoint}`, {
+      await fetch(`${API_BASE}/reviews`, {
         method: "POST",
         headers,
         body: JSON.stringify({
-          officer_id: reviewer,
-          notes: reason || ""
+          violation_id: id,
+          action,
+          reviewer,
+          reason: reason || "",
+          corrected_plate_text: correctedPlateText || undefined,
         })
       });
     } catch (e) {
       console.log("API offline, updated review status in memory");
     }
   }, [triggerNotification, token]);
+
+  // Approve/reject ONE violation inside a clubbed multi-violation record
+  // (same image, different finding) without resolving the whole row — the
+  // row's overall status only flips once every item in it has a decision.
+  const reviewViolationItem = useCallback(async (
+    id: string,
+    itemIndex: number,
+    action: "Approved" | "Rejected" | "Escalated",
+    reviewer: string,
+    reason?: string,
+  ) => {
+    const itemStatus: "confirmed" | "rejected" | "pending" =
+      action === "Approved" ? "confirmed" : action === "Rejected" ? "rejected" : "pending";
+
+    setViolations(prev => prev.map(v => {
+      if (v.id !== id || !v.violationItems) return v;
+      const items = v.violationItems.map((it, i) =>
+        i === itemIndex ? { ...it, reviewStatus: itemStatus, escalated: action === "Escalated" } : it
+      );
+      const statuses = items.map(it => it.reviewStatus);
+      const rowStatus: ViolationStatus = statuses.some(s => s === "pending")
+        ? "pending"
+        : statuses.some(s => s === "confirmed")
+          ? "confirmed"
+          : "rejected";
+      return { ...v, violationItems: items, status: rowStatus, officerId: reviewer };
+    }));
+
+    triggerNotification("System Alert", `Item #${itemIndex + 1} of ${id} was ${action.toLowerCase()} by ${reviewer}.`, "low");
+
+    const headers: HeadersInit = token ? {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${token}`
+    } : { "Content-Type": "application/json" };
+
+    try {
+      await fetch(`${API_BASE}/reviews`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          violation_id: id,
+          action,
+          reviewer,
+          reason: reason || "",
+          item_index: itemIndex,
+        })
+      });
+    } catch (e) {
+      console.log("API offline, updated review status in memory");
+    }
+  }, [triggerNotification, token]);
+
+  // Fetch the full ViolationDetailResponse (includes json_record) for one
+  // violation — the list/WS-synced `violations` array intentionally only
+  // carries summary fields, so the Review Queue calls this to get real
+  // per-plate OCR detections, driver-state alerts, and processing info.
+  const fetchViolationDetail = useCallback(async (id: string): Promise<Violation | null> => {
+    try {
+      const headers: HeadersInit = token ? { "Authorization": `Bearer ${token}` } : {};
+      const res = await fetch(`${API_BASE}/violations/${id}`, { headers });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const detailed = mapBackendViolationToUI(data);
+      setViolations(prev => prev.map(v => v.id === id ? { ...v, ...detailed } : v));
+      return detailed;
+    } catch (e) {
+      console.error("Error fetching violation detail:", e);
+      return null;
+    }
+  }, [token, mapBackendViolationToUI]);
 
   const clearNotifications = useCallback(() => {
     setNotifications([]);
@@ -690,91 +831,10 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, [triggerNotification, isBackendConnected, token]);
 
-  // Client-side fallback progress simulator (runs ONLY if backend is completely offline)
-  useEffect(() => {
-    if (isBackendConnected) return;
-
-    const jobTimer = setInterval(() => {
-      setJobs(prevJobs => {
-        let updated = false;
-        const nextJobs = prevJobs.map(job => {
-          if (job.status === "Queued") {
-            updated = true;
-            return { ...job, status: "Processing" as JobStatus, progress: 10 };
-          }
-          if (job.status === "Processing") {
-            updated = true;
-            const step = job.sourceType === "Video" ? 15 : 45;
-            const nextProgress = Math.min(job.progress + step, 100);
-            const frames = job.sourceType === "Video" ? Math.floor((nextProgress / 100) * 240) : 1;
-            const duration = Math.round((Date.now() - new Date(job.uploadTime).getTime()) / 1000);
-            
-            if (nextProgress >= 100) {
-              const count = Math.random() > 0.4 ? (job.sourceType === "Video" ? 2 : 1) : 0;
-              
-              setTimeout(() => {
-                const camList = cameras.filter(c => c.status === "Active");
-                const targetCam = camList[Math.floor(Math.random() * camList.length)] || initialCameras[0];
-                
-                for (let i = 0; i < count; i++) {
-                  const vType = ["Speeding", "Red Light", "Seatbelt", "Wrong Way"][Math.floor(Math.random() * 4)];
-                  const pNum = generatePlate();
-                  const vId = `VIO-JOB-${Date.now()}-${i}`;
-                  
-                  const colors = ["#EF4444", "#3B82F6", "#10B981", "#F59E0B", "#8B5CF6"];
-                  const selectedColor = colors[Math.floor(Math.random() * colors.length)];
-                  const svgTypes: EvidenceFrame["vehicleSvgType"][] = ["sedan", "suv", "motorcycle", "truck"];
-                  const selectedSvg = svgTypes[Math.floor(Math.random() * svgTypes.length)];
-                  const vTypesStr = selectedSvg === "motorcycle" ? "Motorcycle" : (selectedSvg === "truck" ? "Heavy Truck" : "Passenger Vehicle");
-
-                  const newVio: Violation = {
-                    id: vId,
-                    type: vType,
-                    timestamp: new Date().toISOString(),
-                    location: targetCam.location,
-                    cameraId: targetCam.id,
-                    vehicleType: vTypesStr,
-                    plateNumber: pNum,
-                    confidenceScore: parseFloat((85 + Math.random() * 14).toFixed(1)),
-                    status: "Detected",
-                    beforeFrame: { timestamp: new Date(Date.now() - 1000).toISOString(), vehicleBox: { x: 50, y: 120, w: 90, h: 55 }, plateBox: { x: 90, y: 155, w: 20, h: 10 }, lightColor: vType === "Red Light" ? "Green" : undefined, speed: vType === "Speeding" ? 58 : undefined, vehicleSvgType: selectedSvg, color: selectedColor },
-                    violationFrame: { timestamp: new Date().toISOString(), vehicleBox: { x: 120, y: 100, w: 95, h: 58 }, plateBox: { x: 165, y: 138, w: 22, h: 11 }, lightColor: vType === "Red Light" ? "Red" : undefined, speed: vType === "Speeding" ? 82 : undefined, vehicleSvgType: selectedSvg, color: selectedColor },
-                    afterFrame: { timestamp: new Date(Date.now() + 1000).toISOString(), vehicleBox: { x: 220, y: 80, w: 90, h: 55 }, plateBox: { x: 260, y: 115, w: 20, h: 10 }, lightColor: vType === "Red Light" ? "Red" : undefined, speed: vType === "Speeding" ? 83 : undefined, vehicleSvgType: selectedSvg, color: selectedColor }
-                  };
-                  addViolation(newVio);
-                }
-                
-                triggerNotification(
-                  "System Alert",
-                  `Simulated local Ingestion Complete: Job found ${count} infractions`,
-                  count > 0 ? "medium" : "low"
-                );
-              }, 100);
-
-              return {
-                ...job,
-                progress: 100,
-                status: "Completed" as JobStatus,
-                framesProcessed: frames,
-                duration,
-                violationsFound: count
-              };
-            }
-            
-            return {
-              ...job,
-              progress: nextProgress,
-              framesProcessed: frames,
-              duration
-            };
-          }
-          return job;
-        });
-        return updated ? nextJobs : prevJobs;
-      });
-    }, 1000);
-    return () => clearInterval(jobTimer);
-  }, [cameras, isBackendConnected, addViolation, triggerNotification]);
+  // When the backend is offline, we let the syncWithBackend REST calls retrieve
+  // the exact database status. We do NOT run a local client-side interval timer
+  // that forces queued/processing jobs to Failed status. This is to avoid
+  // race conditions on temporary WebSocket drops.
 
   // Periodic heartbeat for active cameras (only when backend offline)
   useEffect(() => {
@@ -811,16 +871,18 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       toggleCameraStatus,
       testCameraConnection,
       deleteCamera,
-      addViolation,
-      updateViolationStatus,
+      reviewViolation,
+      reviewViolationItem,
       submitUploadJob,
+      fetchViolationDetail,
       clearNotifications,
       markNotificationRead,
       isSimulating,
       setIsSimulating,
       simulationInterval,
       setSimulationInterval,
-      isBackendConnected
+      isBackendConnected,
+      isWsConnected
     }}>
       {children}
     </PlatformContext.Provider>

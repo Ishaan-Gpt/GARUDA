@@ -82,6 +82,8 @@ async def register_camera(body: CameraCreate, db: AsyncSession = Depends(get_db)
         status="active",
         last_seen=datetime.utcnow().isoformat(),
         description=body.description,
+        rtsp_url=body.rtsp_url,
+        resolution=body.resolution,
     )
     db.add(cam)
     await db.commit()
@@ -112,8 +114,20 @@ async def update_camera_config(
 
     if body.stop_line_y is not None:
         cam.stop_line_y = body.stop_line_y
+    if body.parking_zones is not None:
+        cam.parking_zones = json.dumps(body.parking_zones)
+    if body.traffic_direction is not None:
+        if body.traffic_direction not in ("down", "up", "left", "right"):
+            raise HTTPException(422, "traffic_direction must be one of: down, up, left, right")
+        cam.traffic_direction = body.traffic_direction
+    if body.wrong_side_zone is not None:
+        cam.wrong_side_zone = json.dumps(body.wrong_side_zone)
     if body.description is not None:
         cam.description = body.description
+    if body.rtsp_url is not None:
+        cam.rtsp_url = body.rtsp_url
+    if body.resolution is not None:
+        cam.resolution = body.resolution
 
     await db.commit()
     await db.refresh(cam)
@@ -359,7 +373,6 @@ async def ws_patrol(websocket: WebSocket):
     await websocket.accept()
     logger.info("Patrol WebSocket client connected")
     
-    import random
     import base64
     import cv2
     import numpy as np
@@ -404,10 +417,28 @@ async def ws_patrol(websocket: WebSocket):
             
             if ml_available and not is_simulator:
                 try:
-                    # Apply CLAHE and Adaptive Gamma correction (low-light enhancement) in real-time
-                    processed = ml_preprocessor._enhance_low_light(img)
-                    processed = ml_preprocessor._normalize_exposure(processed)
-                    
+                    # Apply this camera's calibration (stop-line, parking zones,
+                    # traffic direction) if it's a registered camera; otherwise
+                    # fall back to generic defaults — tagged uncalibrated below.
+                    async with AsyncSessionLocal() as cal_session:
+                        cam_row = (await cal_session.execute(
+                            select(CameraModel).where(CameraModel.id == camera_id)
+                        )).scalar_one_or_none()
+                    calibrated = cam_row is not None
+                    if cam_row:
+                        ml_classifier.stop_line_y = cam_row.stop_line_y
+                        ml_classifier.parking_zones = json.loads(cam_row.parking_zones or "[]")
+                        ml_classifier.traffic_direction = cam_row.traffic_direction or "down"
+                        ml_classifier.wrong_side_zone = json.loads(cam_row.wrong_side_zone or "[]")
+                    else:
+                        ml_classifier.stop_line_y = 380
+                        ml_classifier.parking_zones = []
+                        ml_classifier.traffic_direction = "down"
+                        ml_classifier.wrong_side_zone = []
+
+                    # Apply optimized preprocessor with is_video=True to leverage daylight bypass and pre-scaling
+                    processed = ml_preprocessor.preprocess(img, is_video=True)
+
                     detections = ml_detector.detect(processed)
                     vehicles = ml_detector.get_vehicles(detections)
                     persons = ml_detector.get_persons(detections)
@@ -445,6 +476,10 @@ async def ws_patrol(websocket: WebSocket):
                         
                         plate_text = "PLATE-UNREAD"
                         plate_conf = 0.0
+                        plate_state = "Unknown"
+                        plate_state_code = ""
+                        plate_valid = False
+                        violated_vehicle = None
                         for vehicle in vehicles:
                             vx1, vy1, vx2, vy2 = map(int, vehicle.bbox)
                             h_p, w_p = processed.shape[:2]
@@ -454,56 +489,74 @@ async def ws_patrol(websocket: WebSocket):
                                 if ocr_res.confidence > plate_conf:
                                     plate_text = ocr_res.formatted_text or "PLATE-UNREAD"
                                     plate_conf = ocr_res.confidence
-                        
+                                    plate_state = ocr_res.state_name or "Unknown"
+                                    plate_state_code = ocr_res.state_code
+                                    plate_valid = ocr_res.is_valid
+                            # The vehicle whose bbox matches the violation is the offending one —
+                            # use its real detected class instead of guessing from violation type
+                            if list(map(int, vehicle.bbox)) == list(map(int, v.bbox)):
+                                violated_vehicle = vehicle
+
+                        vehicle_class = violated_vehicle.class_name if violated_vehicle else "unknown"
+
                         # Draw Red overlay for violation on the enhanced processed frame
                         vx1, vy1, vx2, vy2 = map(int, v.bbox)
                         cv2.rectangle(processed, (vx1, vy1), (vx2, vy2), (0, 0, 255), 3)
                         cv2.putText(processed, f"VIOLATION: {v_type}", (vx1, vy1 - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                        
+
                         cv2.rectangle(processed, (10, 10), (w - 10, 50), (0, 0, 255), -1)
                         cv2.putText(processed, f"WARNING: {v_type.upper()} DETECTED", (20, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                        
+
                         vid = f"VIO-PATROL-{datetime.now().strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
-                        
-                        record = {
-                            "violation_id": vid,
-                            "tier": 2,
-                            "action": "HUMAN_REVIEW",
-                            "timestamp": datetime.utcnow().isoformat() + "Z",
-                            "camera": {"id": camera_id, "location": location, "coordinates": {}},
-                            "vehicle": {
-                                "vehicle_class": "motorcycle" if "helmet" in v_type_raw or "triple" in v_type_raw else "car",
-                                "color": "white",
-                                "license_plate": plate_text,
-                                "plate_confidence": plate_conf,
-                                "plate_valid": True,
-                                "plate_state": "Karnataka",
-                                "repeat_offender": False,
-                                "prior_violations": 0,
-                            },
-                            "violations": [{
-                                "type": v_type,
-                                "confidence": v.confidence,
-                                "severity": v.severity,
-                                "fine_amount_inr": v.fine_amount,
-                                "bbox": v.bbox,
-                                "metadata": {"source": "patrol"},
-                            }],
-                            "driver_state": {"alerts": [], "total_alerts": 0},
-                            "evidence": {
-                                "annotated_image": f"/evidence/annotated/{vid}.jpg", 
-                                "raw_frame": f"/evidence/raw/{vid}.jpg"
-                            },
-                        }
-                        
+
                         import os
                         os.makedirs("evidence/annotated", exist_ok=True)
                         cv2.imwrite(f"evidence/annotated/{vid}.jpg", processed)
-                        
+
+                        from ..core.database import upsert_vehicle, VehicleModel
+                        from sqlalchemy import select as _select
                         async with AsyncSessionLocal() as session:
+                            # Look up real prior-violation history for this plate before
+                            # upserting (upsert increments the counter, so this must
+                            # happen first to capture the count as it was before this event)
+                            existing = (await session.execute(
+                                _select(VehicleModel).where(VehicleModel.plate == plate_text)
+                            )).scalar_one_or_none()
+                            prior_violations = existing.violation_count if existing else 0
+                            repeat_offender = existing.is_repeat_offender if existing else False
+
+                            record = {
+                                "violation_id": vid,
+                                "tier": 2,
+                                "action": "HUMAN_REVIEW",
+                                "timestamp": datetime.utcnow().isoformat() + "Z",
+                                "camera": {"id": camera_id, "location": location, "coordinates": {}},
+                                "vehicle": {
+                                    "vehicle_class": vehicle_class,
+                                    "license_plate": plate_text,
+                                    "plate_confidence": plate_conf,
+                                    "plate_valid": plate_valid,
+                                    "plate_state": plate_state,
+                                    "repeat_offender": repeat_offender,
+                                    "prior_violations": prior_violations,
+                                },
+                                "violations": [{
+                                    "type": v_type,
+                                    "confidence": v.confidence,
+                                    "severity": v.severity,
+                                    "fine_amount_inr": v.fine_amount,
+                                    "bbox": v.bbox,
+                                    "metadata": {"source": "patrol", "calibrated": calibrated},
+                                }],
+                                "driver_state": {"alerts": [], "total_alerts": 0},
+                                "evidence": {
+                                    "annotated_image": f"/evidence/annotated/{vid}.jpg",
+                                    "raw_frame": f"/evidence/raw/{vid}.jpg"
+                                },
+                            }
+
                             await save_violation(session, record)
-                            from ..core.database import upsert_vehicle
-                            await upsert_vehicle(session, plate_text, v_type)
+                            await upsert_vehicle(session, plate_text, v_type, state_code=plate_state_code)
                         
                         await broadcast_violation({
                             "event": "violation_detected",

@@ -8,32 +8,61 @@ export default function AnalyticsModule() {
   const { violations, cameras } = usePlatform();
   const [timeframe, setTimeframe] = useState<"Hourly" | "Daily" | "Weekly" | "Monthly">("Daily");
 
-  // Dynamic seed data based on selected timeframe
+  // Real trend data, bucketed from actual violation timestamps — no seed/sample values.
   const trendData = useMemo(() => {
+    const times = violations.map(v => new Date(v.timestamp)).filter(d => !isNaN(d.getTime()));
+    const now = new Date();
+
     switch (timeframe) {
-      case "Hourly":
-        return [
-          { label: "00:00", val: 5 }, { label: "04:00", val: 2 }, { label: "08:00", val: 18 },
-          { label: "12:00", val: 12 }, { label: "16:00", val: 24 }, { label: "20:00", val: 15 }
-        ];
-      case "Daily":
-        return [
-          { label: "Mon", val: 12 }, { label: "Tue", val: 19 }, { label: "Wed", val: 15 },
-          { label: "Thu", val: 22 }, { label: "Fri", val: 30 }, { label: "Sat", val: 25 },
-          { label: "Sun", val: 14 }
-        ];
-      case "Weekly":
-        return [
-          { label: "Week 1", val: 88 }, { label: "Week 2", val: 104 }, 
-          { label: "Week 3", val: 95 }, { label: "Week 4", val: 120 }
-        ];
-      case "Monthly":
-        return [
-          { label: "Jan", val: 320 }, { label: "Feb", val: 280 }, { label: "Mar", val: 410 },
-          { label: "Apr", val: 390 }, { label: "May", val: 450 }, { label: "Jun", val: 512 }
-        ];
+      case "Hourly": {
+        // Today only, bucketed into 4-hour blocks
+        const labels = ["00:00", "04:00", "08:00", "12:00", "16:00", "20:00"];
+        const counts = new Array(6).fill(0);
+        times.forEach(d => {
+          if (d.toDateString() === now.toDateString()) {
+            counts[Math.floor(d.getHours() / 4)]++;
+          }
+        });
+        return labels.map((label, i) => ({ label, val: counts[i] }));
+      }
+      case "Daily": {
+        // Last 7 calendar days, oldest to newest
+        const dayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const days: { label: string; val: number }[] = [];
+        for (let i = 6; i >= 0; i--) {
+          const d = new Date(now);
+          d.setDate(now.getDate() - i);
+          const count = times.filter(t => t.toDateString() === d.toDateString()).length;
+          days.push({ label: dayLabels[d.getDay()], val: count });
+        }
+        return days;
+      }
+      case "Weekly": {
+        // Last 4 weeks (7-day buckets ending today)
+        const weeks: { label: string; val: number }[] = [];
+        for (let i = 3; i >= 0; i--) {
+          const end = new Date(now);
+          end.setDate(now.getDate() - i * 7);
+          const start = new Date(end);
+          start.setDate(end.getDate() - 6);
+          const count = times.filter(t => t >= start && t <= end).length;
+          weeks.push({ label: `Week ${4 - i}`, val: count });
+        }
+        return weeks;
+      }
+      case "Monthly": {
+        // Last 6 calendar months
+        const monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        const months: { label: string; val: number }[] = [];
+        for (let i = 5; i >= 0; i--) {
+          const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+          const count = times.filter(t => t.getFullYear() === d.getFullYear() && t.getMonth() === d.getMonth()).length;
+          months.push({ label: monthLabels[d.getMonth()], val: count });
+        }
+        return months;
+      }
     }
-  }, [timeframe]);
+  }, [timeframe, violations]);
 
   // Camera Performance calculations
   const cameraPerformance = useMemo(() => {
@@ -58,28 +87,25 @@ export default function AnalyticsModule() {
       else if (type.includes("motorcycle")) counts.motorcycle++;
       else if (type.includes("truck") || type.includes("heavy")) counts.truck++;
     });
-    
-    // Add default values to prevent empty chart
-    if (violations.length === 0) {
-      return { sedan: 40, suv: 30, motorcycle: 20, truck: 10 };
-    }
-    
     return counts;
   }, [violations]);
 
-  // Heatmap hourly distribution (Hour index 0-5 representing blocks vs Day Mon-Sun)
-  const heatmapData = [
-    [2, 4, 8, 12, 18, 6], // Mon
-    [3, 5, 12, 10, 22, 8], // Tue
-    [1, 3, 9, 14, 15, 5], // Wed
-    [4, 6, 11, 13, 20, 9], // Thu
-    [5, 9, 18, 22, 34, 15], // Fri
-    [8, 12, 15, 19, 28, 20], // Sat
-    [6, 8, 7, 10, 14, 12]  // Sun
-  ];
-
   const daysOfWeek = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const hourBlocks = ["00-04", "04-08", "08-12", "12-16", "16-20", "20-00"];
+
+  // Real heatmap: bucket every violation's timestamp by day-of-week x 4-hour block.
+  const heatmapData = useMemo(() => {
+    const grid = daysOfWeek.map(() => new Array(6).fill(0));
+    violations.forEach(v => {
+      const d = new Date(v.timestamp);
+      if (isNaN(d.getTime())) return;
+      const dayIdx = (d.getDay() + 6) % 7; // getDay(): 0=Sun..6=Sat -> 0=Mon..6=Sun
+      const hourBlock = Math.floor(d.getHours() / 4);
+      grid[dayIdx][hourBlock]++;
+    });
+    return grid;
+  }, [violations]);
+  const heatmapMax = Math.max(1, ...heatmapData.flat());
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
@@ -239,10 +265,11 @@ export default function AnalyticsModule() {
             <svg viewBox="0 0 100 100" style={{ width: "100%", height: "130px" }}>
               {(() => {
                 const total = vehicleStats.sedan + vehicleStats.suv + vehicleStats.motorcycle + vehicleStats.truck;
-                const pSedan = (vehicleStats.sedan / total) * 100;
-                const pSuv = (vehicleStats.suv / total) * 100;
-                const pMoto = (vehicleStats.motorcycle / total) * 100;
-                const pTruck = (vehicleStats.truck / total) * 100;
+                const safeTotal = total || 1; // avoid div-by-zero when there's no data yet
+                const pSedan = (vehicleStats.sedan / safeTotal) * 100;
+                const pSuv = (vehicleStats.suv / safeTotal) * 100;
+                const pMoto = (vehicleStats.motorcycle / safeTotal) * 100;
+                const pTruck = (vehicleStats.truck / safeTotal) * 100;
 
                 // SVG stroke-dasharray segments calculations (Radius 36, Circumference = ~226.2)
                 const c = 226.2;
@@ -352,9 +379,7 @@ export default function AnalyticsModule() {
                   
                   {/* Block cells */}
                   {heatmapData[dIdx].map((val, hIdx) => {
-                    // Calculate opacity background based on violation counts (e.g. max count of 35)
-                    const maxVal = 35;
-                    const opacity = Math.min(0.95, Math.max(0.1, val / maxVal));
+                    const opacity = val === 0 ? 0.06 : Math.min(0.95, Math.max(0.15, val / heatmapMax));
                     const cellBg = `rgba(234, 179, 8, ${opacity})`;
                     const textColor = opacity > 0.5 ? "#FFF" : "var(--text-primary)";
 

@@ -4,7 +4,8 @@ GARUDA ML Pipeline — Driver State Detector
 Pre-violation predictive detection using:
   - MediaPipe FaceMesh (468 landmarks) → Eye Aspect Ratio (drowsiness)
   - MediaPipe FaceMesh → Mouth Aspect Ratio (yawning)
-  - YOLO11n class 67 → Phone use while driving
+  - Phone use is detected from the shared yolov8m class-67 pass
+    (VehicleDetector), not a second model — see enable_phone_detection.
 
 Alerts fire BEFORE a violation occurs, enabling:
   → Flash roadside LED board
@@ -16,6 +17,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -149,6 +151,7 @@ class DriverStateDetector:
         self,
         phone_model_path: Optional[str] = None,
         max_num_faces: int = 3,
+        enable_phone_detection: bool = False,
     ) -> None:
         self.max_num_faces = max_num_faces
         self._face_mesh   = None
@@ -160,31 +163,57 @@ class DriverStateDetector:
         self._yawn_ctr:   Dict[int, int] = defaultdict(int)
 
         self._init_face_mesh()
-        self._init_phone_detector(phone_model_path)
+        if enable_phone_detection:
+            # Skip this when the caller already runs a traffic-class YOLO model
+            # that includes COCO class 67 (cell phone) — e.g. VehicleDetector
+            # with its default class set — to avoid loading a second redundant
+            # detector. Pass those detections straight to analyze_frame's
+            # phone_detections argument instead.
+            self._init_phone_detector(phone_model_path)
 
     # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
 
     def _init_face_mesh(self) -> None:
+        # mediapipe >=0.10.x dropped the legacy `mp.solutions.face_mesh` API in
+        # favour of the Tasks API (FaceLandmarker + a downloadable .task model
+        # bundle). Landmark indexing (468-point topology) is unchanged, so the
+        # EAR/MAR index constants below still apply.
         try:
             import mediapipe as mp  # type: ignore
+            from mediapipe.tasks.python import vision as mp_vision  # type: ignore
+            from mediapipe.tasks.python.core.base_options import BaseOptions  # type: ignore
 
-            self._mp_fm = mp.solutions.face_mesh
-            self._face_mesh = self._mp_fm.FaceMesh(
-                max_num_faces=self.max_num_faces,
-                refine_landmarks=True,
-                min_detection_confidence=0.60,
+            model_path = Path(__file__).parent.parent / "models" / "weights" / "face_landmarker.task"
+            if not model_path.exists():
+                logger.warning(
+                    "face_landmarker.task not found at %s — driver state detection disabled. "
+                    "Download from https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+                    "face_landmarker/float16/1/face_landmarker.task",
+                    model_path,
+                )
+                return
+
+            options = mp_vision.FaceLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=str(model_path)),
+                running_mode=mp_vision.RunningMode.IMAGE,
+                num_faces=self.max_num_faces,
+                min_face_detection_confidence=0.60,
                 min_tracking_confidence=0.55,
             )
+            self._mp = mp
+            self._face_mesh = mp_vision.FaceLandmarker.create_from_options(options)
             self._mp_ok = True
-            logger.info("MediaPipe FaceMesh initialised (faces=%d)", self.max_num_faces)
+            logger.info("MediaPipe FaceLandmarker initialised (faces=%d)", self.max_num_faces)
 
         except ImportError:
             logger.warning(
                 "MediaPipe not installed — driver state detection disabled. "
                 "Install with: pip install mediapipe"
             )
+        except Exception as e:
+            logger.warning("FaceLandmarker init failed (%s) — driver state detection disabled.", e)
 
     def _init_phone_detector(self, model_path: Optional[str]) -> None:
         try:
@@ -276,9 +305,10 @@ class DriverStateDetector:
     ) -> List[DriverAlert]:
         alerts: List[DriverAlert] = []
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        results = self._face_mesh.process(rgb)
+        mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
+        results = self._face_mesh.detect(mp_image)
 
-        if not results.multi_face_landmarks:
+        if not results.face_landmarks:
             # No face visible — reset counters
             self._drowsy_ctr[track_id] = max(0, self._drowsy_ctr[track_id] - 2)
             self._yawn_ctr[track_id]   = max(0, self._yawn_ctr[track_id]   - 2)
@@ -286,9 +316,9 @@ class DriverStateDetector:
 
         h, w = image.shape[:2]
 
-        for face_lm in results.multi_face_landmarks:
+        for face_lm in results.face_landmarks:
             landmarks = np.array(
-                [(lm.x * w, lm.y * h) for lm in face_lm.landmark],
+                [(lm.x * w, lm.y * h) for lm in face_lm],
                 dtype=np.float32,
             )
 

@@ -86,28 +86,25 @@ Five model checkpoints are live in `ml/models/weights/` and auto-load in `demo_p
 
 Training curves: `ml/models/weights/helmet_training_report.png`. Raw metrics: `ml/models/weights/helmet_metrics.json`.
 
-### 4. License plate detector — primary  `plate_yolov8_moin.pt`
+### 4. License plate detector — primary  `open-image-models` (YOLOv9, ONNX)
 
 | | |
 |---|---|
-| **Architecture** | YOLOv8m — 25,856,899 parameters (~25.85M), 52 MB |
-| **Training data** | Large multi-country license plate dataset (general-purpose plate localisation) |
-| **Classes** | Single class: `licence` |
-| **Strengths** | High recall on partially occluded and skewed plates; robust to diverse plate formats |
+| **Architecture** | `yolo-v9-s-608-license-plate-end2end` from the `open-image-models` package — ONNX, auto-downloaded and cached on first use |
+| **Why this and not a local `.pt`** | Benchmarked against `plate_yolov8_moin.pt` and `plate_yolo.pt` (below) on real evidence frames: this detector found plates on 7-9/11 vehicles per frame vs. 2/11 for the local YOLOv8m model, which only fired on motorcycles and missed every car. ONNX also avoids the arbitrary-code-execution risk of loading a pickled `.pt` from an unverified source. |
+| **Role in the pipeline** | Localises the plate inside each vehicle crop *before* OCR runs — this is the actual fix for "OCR finds nothing": feeding a general OCR model a precisely-cropped plate instead of guessing a region of the vehicle bbox is what makes recognition work at all. |
+| **Reading** | EasyOCR on the detector's tight crop, with a plate-charset allowlist, multi-line (top-to-bottom) joining for 2-row Indian plates, and template-based O/0, I/1, S/5, Z/2, G/6, B/8 correction before validating against the state-code regex. |
 
-### 5. License plate detector — trained fallback  `plate_yolo.pt`
+### 5. License plate detector — local weights (present but currently unused) `plate_yolov8_moin.pt` / `plate_yolo.pt`
+
+Two locally-trained YOLO plate detectors exist in `ml/models/weights/` but are **not** wired into the running pipeline:
 
 | | |
 |---|---|
-| **Architecture** | YOLO11n, fine-tuned from COCO-pretrained weights — `ml/training/train_plate_yolo.py` |
-| **Training data** | 433 traffic images with Pascal VOC plate annotations, single class "licence" |
-| **Split** | 80/10/10 train/val/test |
-| **Epochs** | Early-stopped at 38 of 60 (no improvement for 15 epochs) |
-| **mAP@0.5** | **88.16%** |
-| **mAP@0.5:0.95** | 51.02% |
-| **Precision / Recall** | 84.35% / 83.67% |
+| `plate_yolov8_moin.pt` | YOLOv8m, 25.85M params, 52 MB. Documented as "primary" but was never actually loaded by `jobs.py` (which only checked for `plate_yolo.pt`), and underperforms `open-image-models` in direct comparison — see above. |
+| `plate_yolo.pt` | YOLO11n, fine-tuned via `ml/training/train_plate_yolo.py`. 433 images, mAP@0.5 = **88.16%** on its own val/test split, precision/recall 84.35%/83.67%. Kept as the fallback path in `PlateOCR._load_plate_detector` if `open-image-models` is ever unavailable. |
 
-PR curves, F1 curve, confusion matrix: `ml/models/weights/*.png`. Raw metrics: `ml/models/weights/plate_metrics.json`.
+PR curves, F1 curve, confusion matrix for `plate_yolo.pt`: `ml/models/weights/*.png`. Raw metrics: `ml/models/weights/plate_metrics.json`.
 
 ### 6. Traffic light state detector  `traffic_lights_yolov8x.pt`
 
@@ -136,7 +133,7 @@ Not every violation needs a dedicated trained model — geometry/temporal logic 
 | Violation | Method |
 |---|---|
 | Helmet non-compliance | **YOLOv8n model** (`helmet_violation.pt`, mAP@0.5=0.881) → CNN fallback (`helmet_cnn.pt`, 87.44%) |
-| License plate | **YOLOv8m detector** (`plate_yolov8_moin.pt`, 25.85M params) → YOLO11n fallback (`plate_yolo.pt`, mAP@0.5=88.16%) → PaddleOCR/EasyOCR/Tesseract OCR chain |
+| License plate | **YOLOv9 detector** (`open-image-models`, ONNX) locates the plate in the vehicle crop → **EasyOCR** reads the tight crop (charset-restricted, multi-line join, O/0·I/1·S/5 template correction). Local `plate_yolo.pt`/`plate_yolov8_moin.pt` kept as fallback only — see "Known limitations" |
 | Traffic light violation | **ML detector** (`traffic_lights_yolov8x.pt`, 8 signal classes) + HSV colour fallback |
 | Phone use while driving | YOLOv8m COCO class 67 ("cell phone") — no extra training needed |
 | Triple riding | AI helmet detector rider count + geometry fallback (person-boxes inside 2-wheeler box) |
@@ -151,7 +148,8 @@ Not every violation needs a dedicated trained model — geometry/temporal logic 
 - **Edge export untested**: `detector.py` has real `export_tensorrt()`/`export_tflite()` calls, but no Jetson/Raspberry Pi hardware was available to actually run them — no `.engine`/`.tflite` file has ever been produced, and FPS numbers anywhere in `ml_plan.txt` predating this are unverified targets, not measurements.
 - **Cross-camera vehicle re-identification** (matching the same vehicle across different camera feeds) is not implemented — no OSNet/torchreid code exists in this repo.
 - **Federated learning** (`ml/federated/`) has real Flower/FedAvg wiring, but the local training step is currently a no-op stub — officer corrections are collected but not yet used to retrain.
-- License plate **OCR accuracy** (character-level) hasn't been separately benchmarked — only plate *localization* (YOLO) has a measured mAP. Install `paddleocr` or `easyocr` and provide a labeled plate-text test set to get that number.
+- License plate **OCR accuracy** (character-level) hasn't been separately benchmarked — only plate *localization* has a measured mAP for `plate_yolo.pt`. On spot-checked real CCTV frames, EasyOCR recovers recognizable-but-imperfect text (e.g. `GJ15CL0986` read as `6J15CL092`) — digit/letter confusion on small, low-contrast plates remains the main error source even with a correctly localized crop. Provide a labeled plate-text test set to get a real number.
+- `plate_yolov8_moin.pt` is committed but unused — it underperformed `open-image-models` head-to-head (see "ML — Models" above) and was never wired into `jobs.py` to begin with. Left in place in case it's useful for a different camera angle/dataset, but don't assume it's running.
 
 ---
 
@@ -159,7 +157,7 @@ Not every violation needs a dedicated trained model — geometry/temporal logic 
 
 ```
 ML:        YOLOv8m (Ultralytics), MobileNetV3-Small, ByteTrack, MediaPipe FaceMesh,
-           PaddleOCR/EasyOCR/Tesseract, OpenCV, PyTorch, Albumentations
+           open-image-models (YOLOv9 plate detector) + EasyOCR, OpenCV, PyTorch, Albumentations
 Backend:   FastAPI (async), SQLAlchemy 2.0 (async), SQLite (dev) / PostgreSQL (prod),
            Pydantic v2, WebSocket, Twilio (mock mode)
 Frontend:  Next.js 16 (App Router), React 19, TypeScript
@@ -172,16 +170,22 @@ Federated: Flower (flwr) — wiring only, training stub
 
 ### Backend + ML
 
+The license-plate detector (`open-image-models`) requires **Python 3.10+** — newer than
+the rest of the stack strictly needs, so it lives in its own venv rather than forcing a
+system-wide Python upgrade.
+
 ```bash
-pip install -r requirements.txt
+py -3.11 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install "open-image-models[onnx]" easyocr
 cp .env.example .env
-uvicorn backend.main:app --reload --port 8000      # http://localhost:8000/docs
+.venv\Scripts\python.exe -m uvicorn backend.main:app --reload --port 8000      # http://localhost:8000/docs
 
 # Run the ML pipeline on an image and push real results into the backend:
-python ml/demo_pipeline.py --input sample.jpg --backend-url http://localhost:8000 --verbose
+.venv\Scripts\python.exe ml/demo_pipeline.py --input sample.jpg --backend-url http://localhost:8000 --verbose
 
 # Or with driver-state (drowsiness/phone) analysis:
-python ml/demo_pipeline.py --input sample.jpg --driver-state --backend-url http://localhost:8000
+.venv\Scripts\python.exe ml/demo_pipeline.py --input sample.jpg --driver-state --backend-url http://localhost:8000
 ```
 
 ### Frontend dashboard

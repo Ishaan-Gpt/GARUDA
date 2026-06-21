@@ -1,4 +1,5 @@
 # GARUDA — Python Requirements
+# Requires Python 3.10+ (open-image-models, used for license plate detection, needs it)
 # Install: pip install -r requirements.txt
 # GPU:     pip install -r requirements.txt torch --index-url https://download.pytorch.org/whl/cu121
 
@@ -11,15 +12,17 @@ Pillow>=10.0.0               # Image I/O
 # ===== Preprocessing =====
 albumentations>=1.3.0        # Training augmentation
 
-# ===== OCR (install at least one) =====
-# Option 1: Best accuracy — PaddleOCR
-paddlepaddle>=2.5.0          # GPU version: paddlepaddle-gpu
-paddleocr>=2.7.0
+# ===== License plate OCR =====
+# Plate detection (locates the plate inside the vehicle crop — requires Python 3.10+)
+open-image-models[onnx]>=0.5.0
 
-# Option 2: EasyOCR fallback (lighter)
-# easyocr>=1.7.0
+# Plate text reading
+easyocr>=1.7.0
 
-# Option 3: Tesseract (last resort, install binary separately)
+# Optional / inert fallbacks (not reliably functional in this project's environment —
+# kept only because ml/pipeline/ocr.py will use them automatically if available):
+# paddlepaddle>=2.5.0
+# paddleocr>=2.7.0
 # pytesseract>=0.3.10
 
 # ===== Driver State =====

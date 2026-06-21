@@ -111,6 +111,15 @@ class CameraModel(Base):
     status       : Mapped[str]   = mapped_column(String, default="active")
     last_seen    : Mapped[str]   = mapped_column(String, default="")
     description  : Mapped[str]   = mapped_column(String, default="")
+    rtsp_url     : Mapped[str]   = mapped_column(String, default="")
+    resolution   : Mapped[str]   = mapped_column(String, default="")
+    # Calibration for stop-line/red-light/wrong-side/illegal-parking detection.
+    # JSON-encoded list of [x1,y1,x2,y2] no-parking rectangles.
+    parking_zones    : Mapped[str] = mapped_column(Text, default="[]")
+    # Legal direction of travel as seen by this camera: "down"|"up"|"left"|"right"
+    traffic_direction: Mapped[str] = mapped_column(String, default="down")
+    # JSON-encoded list of [x1,y1,x2,y2] zones reserved for oncoming traffic only.
+    wrong_side_zone   : Mapped[str] = mapped_column(Text, default="[]")
 
 
 class VehicleModel(Base):
@@ -151,6 +160,13 @@ class JobModel(Base):
     frames_processed : Mapped[int]   = mapped_column(Integer, default=0)
     violations_found : Mapped[int]   = mapped_column(Integer, default=0)
     upload_time      : Mapped[str]   = mapped_column(String, default=lambda: datetime.utcnow().isoformat() + "Z")
+    camera_id        : Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # JSON-encoded {"records": [...every per-image/per-frame pipeline record,
+    # violation or compliant, never collapsed...]} — the full real-pipeline
+    # breakdown for the Evidence page, independent of which records also made
+    # it into the violations table (that save path intentionally collapses
+    # an all-compliant video to one representative row; this column doesn't).
+    result_summary   : Mapped[str]   = mapped_column(Text, default="{}")
 
 
 class AuditLogModel(Base):
@@ -168,10 +184,39 @@ class AuditLogModel(Base):
 # Init / teardown
 # ---------------------------------------------------------------------------
 
+async def _add_missing_columns(conn, table: str, new_columns: Dict[str, str]) -> None:
+    """
+    SQLAlchemy's create_all() only creates missing tables, never alters
+    existing ones. Add columns shipped after a table's initial release to
+    already-deployed databases, in place.
+
+    SQLite-only (PRAGMA table_info): fine for dev/this project. A fresh
+    Postgres deployment gets new columns straight from create_all() since
+    the table won't exist yet there.
+    """
+    if "sqlite" not in settings.DATABASE_URL:
+        return
+    result = await conn.execute(text(f"PRAGMA table_info({table})"))
+    existing = {row[1] for row in result.fetchall()}
+    for col, ddl in new_columns.items():
+        if col not in existing:
+            await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
+            logger.info("Migrated %s table: added column %s", table, col)
+
+
 async def init_db() -> None:
     """Create all tables. Called on FastAPI startup."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _add_missing_columns(conn, "cameras", {
+            "parking_zones":     "TEXT DEFAULT '[]'",
+            "traffic_direction": "VARCHAR DEFAULT 'down'",
+            "wrong_side_zone":   "TEXT DEFAULT '[]'",
+        })
+        await _add_missing_columns(conn, "processing_jobs", {
+            "camera_id":      "VARCHAR",
+            "result_summary": "TEXT DEFAULT '{}'",
+        })
     logger.info("Database initialised: %s", settings.DATABASE_URL)
 
     # Seed default users
@@ -219,19 +264,46 @@ async def get_db():
 # CRUD helpers
 # ---------------------------------------------------------------------------
 
+_SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3, "none": -1}
+
+
+def _club_violations_summary(violations: List[Dict]) -> tuple[str, float, str, int]:
+    """
+    One image can carry several distinct violations (e.g. helmet + triple
+    riding on the same frame). They're saved as ONE clubbed citation row, not
+    one row per violation, so an officer reviews the whole image at once.
+    Roll the list up into one summary: every distinct type (joined), the
+    weakest (minimum) confidence — the figure that actually decides whether
+    the case needed review — the worst severity, and the total fine.
+    """
+    if not violations:
+        return "", 0.0, "", 0
+
+    types: List[str] = []
+    for v in violations:
+        t = normalize_violation_type(v.get("type", ""))
+        if t not in types:
+            types.append(t)
+
+    confidence = min(v.get("confidence", 0.0) for v in violations)
+    severity = max((v.get("severity", "low") for v in violations), key=lambda s: _SEVERITY_RANK.get(s, 0))
+    fine_amount = sum(v.get("fine_amount_inr", 0) for v in violations)
+    return ", ".join(types), confidence, severity, fine_amount
+
+
 async def save_violation(session: AsyncSession, record: Dict) -> ViolationModel:
-    raw_type = record.get("violations", [{}])[0].get("type", "") if record.get("violations") else ""
+    violation_type, confidence, severity, fine_amount = _club_violations_summary(record.get("violations", []))
     obj = ViolationModel(
         id             = record["violation_id"],
         camera_id      = record.get("camera", {}).get("id", ""),
         location       = record.get("camera", {}).get("location", ""),
         timestamp      = record.get("timestamp", datetime.utcnow().isoformat()),
-        violation_type = normalize_violation_type(raw_type),
-        confidence     = record.get("violations", [{}])[0].get("confidence", 0.0) if record.get("violations") else 0.0,
-        severity       = record.get("violations", [{}])[0].get("severity", "") if record.get("violations") else "",
+        violation_type = violation_type,
+        confidence     = confidence,
+        severity       = severity,
         tier           = record.get("tier", 3),
         action         = record.get("action", ""),
-        fine_amount    = record.get("violations", [{}])[0].get("fine_amount_inr", 0) if record.get("violations") else 0,
+        fine_amount    = fine_amount,
         plate_text     = record.get("vehicle", {}).get("license_plate", ""),
         plate_conf     = record.get("vehicle", {}).get("plate_confidence", 0.0),
         vehicle_class  = record.get("vehicle", {}).get("vehicle_class", ""),

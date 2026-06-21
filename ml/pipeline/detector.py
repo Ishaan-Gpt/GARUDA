@@ -161,6 +161,7 @@ class VehicleDetector:
         self.conf = conf
         self.iou = iou
         self._model = None
+        self._model_name = "yolov8m"
         self._load_model(model_path)
 
     # ------------------------------------------------------------------
@@ -173,6 +174,7 @@ class VehicleDetector:
 
             if model_path and Path(model_path).exists():
                 self._model = YOLO(model_path)
+                self._model_name = Path(model_path).stem
                 logger.info("Loaded model: %s", model_path)
             else:
                 # Use local copy in weights dir; ultralytics auto-downloads if missing
@@ -388,6 +390,10 @@ class VehicleDetector:
     # ------------------------------------------------------------------
     # Info
     # ------------------------------------------------------------------
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
 
     @property
     def model_info(self) -> dict:

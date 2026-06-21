@@ -13,7 +13,7 @@ yolov8m.pt
 datasets/
 data/raw/
 runs/
-evidence/
+/evidence/
 test_assets/
 
 # Env

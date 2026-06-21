@@ -330,7 +330,7 @@ def run_video(args) -> None:
             continue
 
         # Detect + track
-        processed  = preprocessor.preprocess(frame, enhance=False)
+        processed  = preprocessor.preprocess(frame, enhance=False, is_video=True)
         detections = detector.detect_with_tracking(processed)
         vehicles   = detector.get_vehicles(detections)
         persons    = detector.get_persons(detections)

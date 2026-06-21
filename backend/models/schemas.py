@@ -94,7 +94,7 @@ class EvidencePaths(BaseModel):
 class ProcessingInfo(BaseModel):
     inference_device    : str = "CPU"
     inference_time_ms   : float = 0.0
-    model               : str = "yolo11n"
+    model               : str = "yolov8m"
     ocr_engine          : str = "unknown"
 
 
@@ -141,8 +141,10 @@ class ViolationResponse(BaseModel):
     action          : str
     fine_amount     : int
     plate_text      : str
+    plate_conf      : float = 0.0
     vehicle_class   : str
     annotated_img   : str
+    raw_img         : str = ""
     status          : str
     officer_id      : Optional[str] = None
     created_at      : str
@@ -184,6 +186,8 @@ class CameraCreate(BaseModel):
     lon         : float = 0.0
     stop_line_y : int = 380
     description : str = ""
+    rtsp_url    : str = ""
+    resolution  : str = ""
 
 
 class CameraResponse(BaseModel):
@@ -195,14 +199,31 @@ class CameraResponse(BaseModel):
     status      : str
     last_seen   : str
     description : str
+    rtsp_url    : str
+    resolution  : str
+    parking_zones     : List[List[int]] = []
+    traffic_direction  : str = "down"
+    wrong_side_zone    : List[List[int]] = []
 
     model_config = {"from_attributes": True}
 
+    @field_validator("parking_zones", "wrong_side_zone", mode="before")
+    @classmethod
+    def _parse_zone_json(cls, v):
+        if isinstance(v, str):
+            import json
+            return json.loads(v) if v else []
+        return v
+
 
 class CameraConfigUpdate(BaseModel):
-    stop_line_y     : Optional[int] = None
-    parking_zones   : Optional[List[List[int]]] = None
-    description     : Optional[str] = None
+    stop_line_y       : Optional[int] = None
+    parking_zones     : Optional[List[List[int]]] = None
+    traffic_direction  : Optional[str] = None   # "down"|"up"|"left"|"right"
+    wrong_side_zone    : Optional[List[List[int]]] = None
+    description       : Optional[str] = None
+    rtsp_url          : Optional[str] = None
+    resolution        : Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
