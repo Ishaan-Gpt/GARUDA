@@ -30,9 +30,12 @@ try:
 
     WEIGHTS_DIR = Path(__file__).parent.parent.parent / "ml" / "models" / "weights"
     HELMET_WEIGHTS = str(WEIGHTS_DIR / "helmet_cnn.pt") if (WEIGHTS_DIR / "helmet_cnn.pt").exists() else None
-    PLATE_WEIGHTS = str(WEIGHTS_DIR / "plate_yolo.pt") if (WEIGHTS_DIR / "plate_yolo.pt").exists() else None
+    # Use the larger, more accurate plate model (49.6 MB) with fallback to small one
+    PLATE_WEIGHTS = str(WEIGHTS_DIR / "plate_yolov8_moin.pt") if (WEIGHTS_DIR / "plate_yolov8_moin.pt").exists() else (
+        str(WEIGHTS_DIR / "plate_yolo.pt") if (WEIGHTS_DIR / "plate_yolo.pt").exists() else None
+    )
 
-    logger.info("Initializing real ML pipeline models: helmet_cnn=%s, plate_yolo=%s", HELMET_WEIGHTS, PLATE_WEIGHTS)
+    logger.info("Initializing real ML pipeline models: helmet=%s, plate=%s", HELMET_WEIGHTS, PLATE_WEIGHTS)
     
     ml_preprocessor = ImagePreprocessor()
     ml_detector = VehicleDetector(model_path=None, device="cpu")
@@ -417,8 +420,13 @@ async def ws_patrol(websocket: WebSocket):
                         cv2.rectangle(processed, (x1, y1), (x2, y2), color, 2)
                         cv2.putText(processed, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
                     
-                    # Run checks
-                    violations = ml_classifier.check_all(processed, vehicles, persons)
+                    # Run checks (pass full frame for signal detection; extract phone detections)
+                    phone_dets = [d for d in detections if d.class_name == "cell phone"]
+                    violations = ml_classifier.check_all(
+                        processed, vehicles, persons,
+                        signal_frame=processed,
+                        phone_detections=phone_dets,
+                    )
                     if violations:
                         v = violations[0]
                         is_violation = True
