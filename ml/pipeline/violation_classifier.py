@@ -222,20 +222,25 @@ class HelmetClassifier:
 
 class AIHelmetViolationDetector:
     """
-    Helmet violation detector — iam-tsr/yolov8n-helmet-detection (mAP@0.5=0.881).
+    Helmet violation detector using JarvanLee/yolov8-helmet-violation-detection (mAP@0.5=64.8%).
 
-    2 classes: helmet, no_helmet
+    3 classes: helmet (0), head (1=no helmet), person (2)
+    Runs on the FULL image and associates 'head' detections with vehicle bboxes.
     Falls back to crop-based HelmetClassifier when weights are unavailable.
     """
 
-    _WEIGHTS = Path(__file__).parent.parent / "models" / "weights" / "helmet_violation.pt"
-    _VIOLATION_CLASSES = {"Without Helmet"}
-    _RIDER_CLASSES     = {"With Helmet", "Without Helmet"}
+    _WEIGHTS = Path(__file__).parent.parent / "models" / "weights" / "helmet_best.pt"
+    _NO_HELMET_CLASS = "head"    # exposed head = no helmet
+    _HELMET_CLASS    = "helmet"
 
     def __init__(self, helmet_weights_path: Optional[str] = None) -> None:
         self._model = None
         self._class_names: List[str] = []
         self._fallback = HelmetClassifier(helmet_weights_path)
+        # Cache full-image results so multiple vehicles share one inference call
+        self._cached_image_id: Optional[int] = None
+        self._cached_heads:    List[List[float]] = []   # boxes where head (no helmet) found
+        self._cached_helmets:  List[List[float]] = []   # boxes where helmet found
         self._try_load()
 
     def _try_load(self) -> None:
@@ -244,12 +249,45 @@ class AIHelmetViolationDetector:
             if self._WEIGHTS.exists():
                 self._model = YOLO(str(self._WEIGHTS))
                 self._class_names = list(self._model.names.values())
-                logger.info("AIHelmetViolationDetector: loaded %s (%d classes)",
-                            self._WEIGHTS.name, len(self._class_names))
+                logger.info("HelmetDetector: loaded %s (%d classes: %s)",
+                            self._WEIGHTS.name, len(self._class_names), self._class_names)
             else:
-                logger.info("helmet_violation.pt not found — using crop-based HelmetClassifier fallback")
+                logger.info("helmet_best.pt not found — using crop-based HelmetClassifier fallback")
         except Exception as e:
-            logger.warning("Could not load AICity helmet model (%s), using fallback", e)
+            logger.warning("Could not load helmet model (%s), using fallback", e)
+
+    def _run_full_image(self, image: np.ndarray) -> None:
+        """Run best.pt on full image and cache head/helmet boxes."""
+        img_id = id(image)
+        if img_id == self._cached_image_id:
+            return  # already cached for this frame
+
+        self._cached_image_id = img_id
+        self._cached_heads    = []
+        self._cached_helmets  = []
+
+        try:
+            results = self._model.predict(image, conf=0.25, iou=0.45, verbose=False)
+            for result in results:
+                for box in result.boxes:
+                    name = result.names[int(box.cls[0])]
+                    xyxy = box.xyxy[0].tolist()
+                    if name == self._NO_HELMET_CLASS:
+                        self._cached_heads.append(xyxy)
+                    elif name == self._HELMET_CLASS:
+                        self._cached_helmets.append(xyxy)
+        except Exception as e:
+            logger.warning("Helmet full-image inference failed: %s", e)
+
+    def _head_above_vehicle(self, head_box: List[float], veh_box: List[float]) -> bool:
+        """True if head centre is horizontally inside vehicle and above vehicle's mid-line."""
+        hx1, hy1, hx2, hy2 = head_box
+        vx1, vy1, vx2, vy2 = veh_box
+        hcx = (hx1 + hx2) / 2
+        hcy = (hy1 + hy2) / 2
+        if not (vx1 - 20 <= hcx <= vx2 + 20):
+            return False
+        return hcy <= (vy1 + vy2) / 2
 
     def detect(
         self,
@@ -258,6 +296,8 @@ class AIHelmetViolationDetector:
     ) -> Tuple[bool, float, int]:
         """
         Detect helmet violation on a 2-wheeler.
+        Runs best.pt on the full image (once per frame, cached) then associates
+        'head' detections with the vehicle bounding box.
 
         Returns (violation_found, confidence, rider_count).
         rider_count is used for triple-riding detection.
@@ -266,44 +306,37 @@ class AIHelmetViolationDetector:
             return False, 0.0, 0
 
         x1, y1, x2, y2 = map(int, vehicle.bbox)
-        crop = image[max(0, y1):y2, max(0, x1):x2]
-
-        if crop.size == 0:
-            return False, 0.0, 0
 
         if self._model is None:
-            # Fallback: single-rider crop-based check
             head_h = int((y2 - y1) * 0.45)
             head_crop = image[y1 : y1 + head_h, x1:x2]
             has_helmet, conf = self._fallback.classify(head_crop)
             return not has_helmet, conf, 1
 
         try:
-            results = self._model.predict(crop, conf=0.15, iou=0.45, verbose=False)
-            violation = False
-            best_violation_conf = 0.0
-            rider_count = 0
+            self._run_full_image(image)
+            veh_box = [x1, y1, x2, y2]
 
-            for result in results:
-                for box in result.boxes:
-                    name = result.names[int(box.cls[0])]
-                    conf = float(box.conf[0])
-                    if name in self._RIDER_CLASSES:
-                        rider_count += 1
-                    if name in self._VIOLATION_CLASSES and conf > best_violation_conf:
-                        violation = True
-                        best_violation_conf = conf
+            associated_heads = [h for h in self._cached_heads
+                                if self._head_above_vehicle(h, veh_box)]
+            rider_count = len(associated_heads) + len(
+                [h for h in self._cached_helmets if self._head_above_vehicle(h, veh_box)]
+            )
 
-            # If YOLO found no rider boxes in the crop, fall back to CNN on head region
+            if associated_heads:
+                best_conf = 0.50
+                return True, best_conf, max(rider_count, 1)
+
             if rider_count == 0:
+                # No head/helmet found near vehicle — use fallback
                 head_h = int((y2 - y1) * 0.45)
                 head_crop = image[y1 : y1 + head_h, x1:x2]
                 has_helmet, fb_conf = self._fallback.classify(head_crop)
                 return not has_helmet, fb_conf, 1
 
-            return violation, best_violation_conf, rider_count
+            return False, 0.0, rider_count
         except Exception as e:
-            logger.warning("AICity helmet inference failed (%s), using fallback", e)
+            logger.warning("Helmet inference failed (%s), using fallback", e)
             head_h = int((y2 - y1) * 0.45)
             head_crop = image[y1 : y1 + head_h, x1:x2]
             has_helmet, conf = self._fallback.classify(head_crop)

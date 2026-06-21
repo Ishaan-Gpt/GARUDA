@@ -55,7 +55,11 @@ def _ensure_ml():
         from ml.pipeline.violation_classifier import ViolationClassifier
 
         WEIGHTS_DIR = Path(__file__).parent.parent.parent / "ml" / "models" / "weights"
-        PLATE_WEIGHTS = str(WEIGHTS_DIR / "plate_yolo.pt") if (WEIGHTS_DIR / "plate_yolo.pt").exists() else None
+        # Use the larger, more accurate plate model
+        PLATE_WEIGHTS = str(WEIGHTS_DIR / "plate_yolov8_moin.pt") if (WEIGHTS_DIR / "plate_yolov8_moin.pt").exists() else (
+            str(WEIGHTS_DIR / "plate_yolo.pt") if (WEIGHTS_DIR / "plate_yolo.pt").exists() else None
+        )
+        # helmet_best.pt = JarvanLee yolov8m full-image detector (replaces non-working helmet_violation.pt)
         HELMET_WEIGHTS = str(WEIGHTS_DIR / "helmet_cnn.pt") if (WEIGHTS_DIR / "helmet_cnn.pt").exists() else None
 
         ml_preprocessor = ImagePreprocessor()
@@ -164,8 +168,13 @@ def _run_ml_on_image(
                     "is_valid": ocr_result.is_valid,
                 })
 
-        # Stage 4: Violation classification
-        violations = ml_classifier.check_all(processed, vehicles, persons)
+        # Stage 4: Violation classification (pass full frame for signal + phone detections)
+        phone_detections = [d for d in detections if d.class_name == "cell phone"]
+        violations = ml_classifier.check_all(
+            processed, vehicles, persons,
+            signal_frame=processed,
+            phone_detections=phone_detections,
+        )
 
         timestamp_now = datetime.utcnow().isoformat() + "Z"
         os.makedirs("evidence/annotated", exist_ok=True)
