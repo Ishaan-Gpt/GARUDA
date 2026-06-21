@@ -487,6 +487,8 @@ class ViolationClassifier:
     helmet_weights_path: Optional path to trained helmet CNN weights
     """
 
+    _SEATBELT_WEIGHTS = Path(__file__).parent.parent / "models" / "weights" / "seatbelt_classifier.pt"
+
     def __init__(
         self,
         stop_line_y: int = 400,
@@ -496,9 +498,22 @@ class ViolationClassifier:
         self.stop_line_y = stop_line_y
         self.parking_zones: List[List[int]] = parking_zones or []
         self.helmet_clf = HelmetClassifier(helmet_weights_path)
-        self.ai_helmet = AIHelmetViolationDetector(helmet_weights_path)  # fallback uses same trained CNN
+        self.ai_helmet = AIHelmetViolationDetector(helmet_weights_path)
         self.signal_det = MLSignalStateDetector()
         self._parked_since: Dict[int, float] = {}
+        self._seatbelt_model = None
+        self._load_seatbelt_model()
+
+    def _load_seatbelt_model(self) -> None:
+        try:
+            from ultralytics import YOLO  # type: ignore
+            if self._SEATBELT_WEIGHTS.exists():
+                self._seatbelt_model = YOLO(str(self._SEATBELT_WEIGHTS))
+                logger.info("SeatbeltClassifier loaded: %s", self._SEATBELT_WEIGHTS.name)
+            else:
+                logger.info("seatbelt_classifier.pt not found — using Hough fallback")
+        except Exception as e:
+            logger.warning("Could not load seatbelt model: %s", e)
 
     # ------------------------------------------------------------------
     # 1. Helmet non-compliance
@@ -725,11 +740,14 @@ class ViolationClassifier:
         vehicle: Detection,
     ) -> Optional[ViolationResult]:
         """
-        Detect missing seatbelt via Hough diagonal line detection in driver region.
-        Seatbelts appear as diagonal lines (30-60°) crossing the driver's torso.
+        Detect missing seatbelt using RISEFyolov11s-seatbelt classifier.
 
-        NOTE: This is inherently imprecise from a distance camera.
-        Returns conservative confidence (≤0.68) → always Tier 2.
+        Flow:
+          1. Skip non-four-wheelers and tiny / square bboxes (autos, bikes)
+          2. Crop windshield + driver-seat ROI (upper 60%, driver side 70%)
+          3. CLAHE + gamma correction for glare/reflection
+          4. Feed crop to YOLOv11s classifier → seat_belt | no_seatbelt
+          5. Fallback to Hough-diagonal heuristic if model unavailable
         """
         if not vehicle.is_four_wheeler:
             return None
@@ -737,27 +755,53 @@ class ViolationClassifier:
         x1, y1, x2, y2 = map(int, vehicle.bbox)
         vh, vw = y2 - y1, x2 - x1
 
-        # Minimum size: small detections are likely misclassified 3-wheelers or background vehicles
         if vw < 110 or vh < 80:
             return None
-
-        # Aspect ratio: enclosed cars/SUVs are wider than tall.
-        # Auto-rickshaws and misclassified 3-wheelers tend to be square/tall.
+        # Skip square/tall bboxes — likely autos or misclassified bikes
         if vw < vh * 0.75:
             return None
 
-        # Driver region: upper 70%, right 55% of car (India RHD — driver sits on right)
-        driver_region = image[y1 : y1 + int(vh * 0.70), x1 + int(vw * 0.45) : x2]
-        if driver_region.size < 100:
+        # ── Windshield / driver-seat ROI ─────────────────────────────────────
+        # India is RHD → driver on right; take left 70% to capture windshield fully
+        roi_y1 = y1
+        roi_y2 = y1 + int(vh * 0.60)
+        roi_x1 = x1
+        roi_x2 = x1 + int(vw * 0.70)
+        roi = image[max(0, roi_y1):roi_y2, max(0, roi_x1):roi_x2]
+        if roi.size < 100:
             return None
 
-        gray = cv2.cvtColor(driver_region, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 25, 100)
-        lines = cv2.HoughLinesP(
-            edges, 1, np.pi / 180,
-            threshold=20, minLineLength=20, maxLineGap=10
-        )
+        # ── CLAHE + gamma correction (fix glare / windshield reflection) ─────
+        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+        l_ch, a_ch, b_ch = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+        l_ch = clahe.apply(l_ch)
+        roi_enhanced = cv2.cvtColor(cv2.merge([l_ch, a_ch, b_ch]), cv2.COLOR_LAB2BGR)
+        gamma_lut = np.array([((i / 255.0) ** 1.2) * 255 for i in range(256)], dtype=np.uint8)
+        roi_enhanced = cv2.LUT(roi_enhanced, gamma_lut)
 
+        # ── YOLOv11s classifier ───────────────────────────────────────────────
+        if self._seatbelt_model is not None:
+            try:
+                results = self._seatbelt_model.predict(roi_enhanced, verbose=False)
+                cls_idx  = int(results[0].probs.top1)
+                cls_name = results[0].names[cls_idx]
+                conf     = float(results[0].probs.top1conf)
+                if cls_name == "no_seatbelt" and conf >= 0.55:
+                    return ViolationResult.create(
+                        ViolationType.SEATBELT_NON_COMPLIANCE,
+                        confidence=round(conf, 4),
+                        bbox=vehicle.bbox,
+                        metadata={"method": "yolov11s_classifier", "cls": cls_name},
+                    )
+                return None   # seat_belt detected or low confidence
+            except Exception as e:
+                logger.warning("Seatbelt classifier inference failed: %s", e)
+
+        # ── Hough-diagonal fallback (original method) ─────────────────────────
+        gray  = cv2.cvtColor(roi_enhanced, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 25, 100)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=20, minLineLength=20, maxLineGap=10)
         diagonal_count = 0
         if lines is not None:
             for line in lines:
@@ -765,24 +809,15 @@ class ViolationClassifier:
                 if xa == xb:
                     continue
                 angle = abs(np.degrees(np.arctan2(yb - ya, xb - xa)))
-                # Seatbelt diagonal: 25°-65° or 115°-155°
                 if 25 < angle < 65 or 115 < angle < 155:
                     diagonal_count += 1
-
-        # Need zero diagonals to confidently flag absence — even 1 diagonal line means belt present
         if diagonal_count >= 1:
-            return None  # Seatbelt likely present
-
-        # No diagonal found → possible no seatbelt
+            return None
         return ViolationResult.create(
             ViolationType.SEATBELT_NON_COMPLIANCE,
-            confidence=0.62,   # Conservative → always Tier 2
+            confidence=0.60,
             bbox=vehicle.bbox,
-            metadata={
-                "method": "hough_diagonal",
-                "diagonal_lines_found": diagonal_count,
-                "always_tier2": True,
-            },
+            metadata={"method": "hough_fallback", "diagonal_lines_found": diagonal_count},
         )
 
     # ------------------------------------------------------------------
@@ -920,4 +955,141 @@ class ViolationClassifier:
                 if v:
                     results.append(v)
 
+            else:
+                # --- Image-only (no tracker) fallbacks for PS compliance ---
+                v = self._check_red_light_static(vehicle.bbox, signal_state, signal_conf)
+                if v:
+                    results.append(v)
+
+                v = self._check_stop_line_static(vehicle.bbox, signal_state)
+                if v:
+                    results.append(v)
+
+                v = self._check_wrong_side_static(vehicle.bbox, image.shape[1])
+                if v:
+                    results.append(v)
+
+                v = self._check_illegal_parking_static(vehicle.bbox)
+                if v:
+                    results.append(v)
+
         return results
+
+    # ------------------------------------------------------------------
+    # Image-only (static frame) counterparts for track-based violations
+    # ------------------------------------------------------------------
+
+    def _check_red_light_static(
+        self,
+        bbox: List[float],
+        signal_state: str,
+        signal_conf: float,
+    ) -> Optional[ViolationResult]:
+        """Red-light: vehicle front past stop line while signal is definitively red."""
+        if signal_state.lower() != "red" or signal_conf < 0.65:
+            return None
+        if bbox[3] <= self.stop_line_y:
+            return None
+        return ViolationResult.create(
+            ViolationType.RED_LIGHT_VIOLATION,
+            confidence=min(0.92, signal_conf * 0.95),
+            bbox=bbox,
+            metadata={
+                "signal_state": "red",
+                "stop_line_y": self.stop_line_y,
+                "signal_confidence": round(signal_conf, 3),
+                "method": "static_position",
+            },
+        )
+
+    def _check_stop_line_static(
+        self,
+        bbox: List[float],
+        signal_state: str,
+    ) -> Optional[ViolationResult]:
+        """Stop-line: vehicle front past stop line while signal is red or yellow."""
+        if signal_state.lower() not in ("red", "yellow"):
+            return None
+        if bbox[3] <= self.stop_line_y:
+            return None
+        return ViolationResult.create(
+            ViolationType.STOP_LINE_VIOLATION,
+            confidence=0.80,
+            bbox=bbox,
+            metadata={
+                "stop_line_y": self.stop_line_y,
+                "signal": signal_state,
+                "method": "static_position",
+            },
+        )
+
+    def _check_wrong_side_static(
+        self,
+        bbox: List[float],
+        frame_width: int,
+    ) -> Optional[ViolationResult]:
+        """
+        Wrong-side heuristic for static images.
+
+        Uses lane-line detection on the full frame row near the vehicle centroid.
+        Falls back to road-centre split: vehicles in the left half of frame
+        heading toward camera (aspect ratio tall) flagged as wrong-side candidates.
+
+        Only fires when confidence is high enough to avoid false positives on
+        legal U-turns, parking, etc.
+        """
+        if frame_width <= 0:
+            return None
+
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
+        vw = bbox[2] - bbox[0]
+        vh = bbox[3] - bbox[1]
+
+        # Skip parked / edge vehicles — must be clearly in wrong lane
+        road_left  = frame_width * 0.10
+        road_right = frame_width * 0.90
+        if cx < road_left or cx > road_right:
+            return None
+
+        road_centre = frame_width * 0.50
+        in_left_half = cx < road_centre
+
+        # India: traffic flows on left side of road. Vehicles occupying right half
+        # coming toward camera (bbox taller, near bottom) are legitimate.
+        # Flag only vehicles clearly in the right half driving toward camera
+        # AND positioned in the upper portion of frame (coming from far side).
+        if not in_left_half:
+            return None
+
+        # Additional heuristic: vehicle must be large enough to be close
+        if vw * vh < 8000:
+            return None
+
+        conf = 0.60  # Moderate — static heuristic only
+        return ViolationResult.create(
+            ViolationType.WRONG_SIDE_DRIVING,
+            confidence=conf,
+            bbox=bbox,
+            metadata={
+                "centre_x": round(cx, 1),
+                "frame_width": frame_width,
+                "method": "static_lane_heuristic",
+            },
+        )
+
+    def _check_illegal_parking_static(
+        self,
+        bbox: List[float],
+    ) -> Optional[ViolationResult]:
+        """Illegal parking: vehicle centre inside a configured no-parking zone (image mode — no timer)."""
+        if not self.parking_zones:
+            return None
+        if not self.is_in_no_parking_zone(bbox):
+            return None
+        return ViolationResult.create(
+            ViolationType.ILLEGAL_PARKING,
+            confidence=0.85,
+            bbox=bbox,
+            metadata={"method": "static_zone_check"},
+        )

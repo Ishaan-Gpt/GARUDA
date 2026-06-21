@@ -80,7 +80,9 @@
       "Read(//mnt/d/vignesh/files/Personal/Hackthon/flipkart_Gridlock2/GARUDA/**)",
       "Read(//mnt/d/vignesh/files/Personal/Hackthon/flipkart_Gridlock2/GARUDA/ml/**)",
       "Bash(grep -v \"^$\\\\|WARNING\\\\|Ultralytics\\\\|YOLO\\\\|Model\\\\|Fusing\\\\|Speed\\\\|Results\")",
-      "Bash(grep -v \"^$\\\\|Ultralytics\\\\|Fusing\\\\|YOLO\\\\|image 1\\\\|Speed\\\\|ultralytics\")"
+      "Bash(grep -v \"^$\\\\|Ultralytics\\\\|Fusing\\\\|YOLO\\\\|image 1\\\\|Speed\\\\|ultralytics\")",
+      "Bash(grep -v \"Ultralytics\\\\|Fusing\\\\|YOLO\\\\|WARNING\\\\|^$\")",
+      "Bash(grep -v \"Ultralytics\\\\|Fusing\\\\|YOLO\\\\|image 1\\\\|Speed\\\\|^$\\\\|ultralytics\")"
     ]
   }
 }
