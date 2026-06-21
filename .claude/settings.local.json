@@ -72,7 +72,8 @@
       "PowerShell(python -c \"import pytesseract; print\\(pytesseract.get_tesseract_version\\(\\)\\)\" 2>&1)",
       "PowerShell(python -c \"import easyocr; print\\('easyocr OK'\\)\" 2>&1)",
       "Bash(pip search *)",
-      "Bash(grep -v \"^$\")"
+      "Bash(grep -v \"^$\")",
+      "Bash(dir \"D:\\\\vignesh\\\\files\\\\Personal\\\\Hackthon\\\\flipkart_Gridlock2\\\\GARUDA\")"
     ]
   }
 }

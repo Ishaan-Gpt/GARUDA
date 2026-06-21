@@ -102,3 +102,60 @@
   └───────────────────┴───────────────────────────────────────────┴─────────────────┴─────────────────────────────────────────────┘    
 
 1111
+
+
+
+  ---
+  What's done ✅
+
+  ┌────────────────────────────────────────────────────────────┬────────────────────────────┐  │                        Requirement                         │           Status           │
+  ├────────────────────────────────────────────────────────────┼────────────────────────────┤
+  │ Image Preprocessing (CLAHE, noise, low-light, blur)        │ ✅ Complete                │
+  ├────────────────────────────────────────────────────────────┼────────────────────────────┤
+  │ Vehicle + Person Detection (YOLOv8m)                       │ ✅ Complete                │
+  ├────────────────────────────────────────────────────────────┼────────────────────────────┤
+  │ Helmet non-compliance                                      │ ✅ Just fixed — working    │
+  ├────────────────────────────────────────────────────────────┼────────────────────────────┤
+  │ Violation classification with confidence scores            │ ✅ Complete                │
+  ├────────────────────────────────────────────────────────────┼────────────────────────────┤
+  │ Evidence generation (annotated images + JSON + timestamps) │ ✅ Complete                │
+  ├────────────────────────────────────────────────────────────┼────────────────────────────┤
+  │ Search / searchable records                                │ ✅ Complete (real DB data) │
+  ├────────────────────────────────────────────────────────────┼────────────────────────────┤
+  │ Dashboard stats                                            │ ✅ Complete (real DB data) │
+  └────────────────────────────────────────────────────────────┴────────────────────────────┘
+
+  ---
+  What's missing or broken ❌
+
+  1. Four violation types don't work for images
+
+  These are coded but require video + tracker history (velocity, bbox timeline):
+  - Wrong-side driving — needs speed direction over time
+  - Stop-line violation — needs calibrated stop line Y + tracked position
+  - Red-light violation — needs tracker + signal state across frames
+  - Illegal parking — needs 5+ minutes of stationary tracking
+
+  For a photo-based system (which is what the problem statement asks for), these need image-only alternatives.
+
+  2. Analytics charts use hardcoded mock data
+
+  AnalyticsModule.tsx — the trend chart (Mon/Tue/Wed... values) and the weekly heatmap are static hardcoded numbers, not pulled from   
+  the database. The problem statement explicitly requires "violation statistics and trends."
+
+  3. No performance evaluation
+
+  The problem statement requires: Accuracy, Precision, Recall, F1-score, mAP. There's no eval script anywhere in the codebase.
+
+  4. Plate OCR shows "UNREAD" on most vehicles
+
+  The fast_plate_ocr engine can't read small/distant plates. The plate_yolov8_moin.pt detector is now wired in but OCR accuracy is     
+  still low for rear plates.
+
+  ---
+  Priority order to fix
+
+  1. Analytics real data — connect trend chart to actual DB violation counts (easy, 1 file change in frontend)
+  2. Wrong-side & stop-line for images — simplified image-only versions (no tracker needed)
+  3. Performance evaluation script — basic mAP/precision/recall on a small test set
+  4. Plate OCR fallback — try EasyOCR on crops that fast_plate_ocr can't read
