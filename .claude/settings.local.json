@@ -71,7 +71,8 @@
       "PowerShell(Get-ChildItem \"D:\\\\vignesh\\\\files\\\\Personal\\\\Hackthon\\\\flipkart_Gridlock2\\\\GARUDA\\\\ml\\\\models\\\\weights\\\\\" | Format-Table Name, @{N='MB';E={[math]::Round\\($_.Length/1MB,1\\)}} -AutoSize)",
       "PowerShell(python -c \"import pytesseract; print\\(pytesseract.get_tesseract_version\\(\\)\\)\" 2>&1)",
       "PowerShell(python -c \"import easyocr; print\\('easyocr OK'\\)\" 2>&1)",
-      "Bash(pip search *)"
+      "Bash(pip search *)",
+      "Bash(grep -v \"^$\")"
     ]
   }
 }
