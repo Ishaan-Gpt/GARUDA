@@ -184,7 +184,7 @@ class VehicleDetector:
                 logger.info("Loaded model: %s", model_path)
             else:
                 # Use local copy in weights dir; ultralytics auto-downloads if missing
-                local = Path(__file__).parent.parent / "models" / "weights" / "yolov8m.pt"
+                local = Path(__file__).parent.parent / "models" / "weights" / "detection" / "yolov8m.pt"
                 self._model = YOLO(str(local) if local.exists() else "yolov8m.pt")
                 logger.info("Loaded yolov8m from %s", local if local.exists() else "ultralytics cache")
 

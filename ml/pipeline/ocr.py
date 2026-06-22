@@ -127,7 +127,7 @@ class PlateOCR:
     """
 
     # 2-stage model paths (auto-resolved relative to this file)
-    _WEIGHTS_DIR   = Path(__file__).parent.parent / "models" / "weights"
+    _WEIGHTS_DIR   = Path(__file__).parent.parent / "models" / "weights" / "ocr"
     _STAGE1_WEIGHTS = _WEIGHTS_DIR / "plate_koushi.pt"   # Koushi — better spatial coverage
     _STAGE2_WEIGHTS = _WEIGHTS_DIR / "plate_yasir.pt"    # YasirFaiz — refines on crop
     _STAGE1_CONF   = 0.05    # low to catch all candidates

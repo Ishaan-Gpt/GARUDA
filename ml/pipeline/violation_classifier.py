@@ -277,7 +277,7 @@ class AIHelmetViolationDetector:
     Falls back to crop-based HelmetClassifier when weights are unavailable.
     """
 
-    _WEIGHTS = Path(__file__).parent.parent / "models" / "weights" / "helmet_best.pt"
+    _WEIGHTS = Path(__file__).parent.parent / "models" / "weights" / "violations" / "helmet_best.pt"
     _NO_HELMET_CLASS = "head"    # exposed head = no helmet
     _HELMET_CLASS    = "helmet"
     # A "head" (no-helmet) box detected below this confidence is too
@@ -484,7 +484,7 @@ class MLSignalStateDetector:
     Falls back to HSV SignalStateDetector if weights are missing.
     """
 
-    _WEIGHTS = Path(__file__).parent.parent / "models" / "weights" / "traffic_lights_yolov8x.pt"
+    _WEIGHTS = Path(__file__).parent.parent / "models" / "weights" / "violations" / "traffic_lights_yolov8x.pt"
 
     def __init__(self) -> None:
         self._model = None
@@ -628,7 +628,7 @@ class ViolationClassifier:
     jobs.py) can re-point calibration per request without reloading models.
     """
 
-    _SEATBELT_WEIGHTS = Path(__file__).parent.parent / "models" / "weights" / "seatbelt_classifier.pt"
+    _SEATBELT_WEIGHTS = Path(__file__).parent.parent / "models" / "weights" / "violations" / "seatbelt_classifier.pt"
     VALID_DIRECTIONS = ("down", "up", "left", "right")
     # Global floor applied to every violation in check_all() — below this,
     # a flagged violation is too uncertain to cite and is dropped (treated

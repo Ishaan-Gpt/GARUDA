@@ -38,108 +38,40 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs")
 
 # ---------------------------------------------------------------------------
-# ML pipeline — lazy init (shared with _routers.py globals)
+# ML pipeline — shared singleton via services.ml_registry
 # ---------------------------------------------------------------------------
+# Previously jobs.py initialised its own ml_* globals and _routers.py did the
+# same, creating two independent model instances. Both now share one registry.
 
-_ml_initialized = False
-ml_preprocessor = None
-ml_detector = None
-ml_ocr = None
-ml_classifier = None
-ml_driver_state = None
-ml_visualizer = None
-ml_available = False
+from ..services.ml_registry import get_ml_registry
+from ..services.calibration_service import CalibrationService
+from ..services.challan_service import ChallanService
 
 
-def _ensure_ml():
-    global _ml_initialized, ml_preprocessor, ml_detector, ml_ocr, ml_classifier, ml_driver_state, ml_visualizer, ml_available
-    if _ml_initialized:
-        return ml_available
-    _ml_initialized = True
-    try:
-        from pathlib import Path
-        from ml.pipeline.preprocessor import ImagePreprocessor
-        from ml.pipeline.detector import VehicleDetector
-        from ml.pipeline.ocr import PlateOCR
-        from ml.pipeline.violation_classifier import ViolationClassifier
-        from ml.pipeline.driver_state import DriverStateDetector
-        from ml.utils.visualizer import FrameVisualizer
-
-        WEIGHTS_DIR = Path(__file__).parent.parent.parent / "ml" / "models" / "weights"
-        # 2-stage plate pipeline: Koushi (Stage-1) + YasirFaiz (Stage-2, auto-loaded by PlateOCR)
-        PLATE_WEIGHTS = str(WEIGHTS_DIR / "plate_koushi.pt") if (WEIGHTS_DIR / "plate_koushi.pt").exists() else (
-            str(WEIGHTS_DIR / "plate_yolov8_moin.pt") if (WEIGHTS_DIR / "plate_yolov8_moin.pt").exists() else None
-        )
-        # helmet_best.pt = JarvanLee yolov8m full-image detector (replaces non-working helmet_violation.pt)
-        HELMET_WEIGHTS = str(WEIGHTS_DIR / "helmet_cnn.pt") if (WEIGHTS_DIR / "helmet_cnn.pt").exists() else None
-
-        ml_preprocessor = ImagePreprocessor()
-        ml_detector = VehicleDetector(model_path=None, device="cpu")
-        ml_ocr = PlateOCR(plate_detector_weights=PLATE_WEIGHTS)
-        ml_classifier = ViolationClassifier(stop_line_y=380, helmet_weights_path=HELMET_WEIGHTS)
-        # enable_phone_detection=False: ml_detector already detects COCO class 67
-        # (cell phone) as part of its normal traffic-class scan, so we pass those
-        # detections in directly instead of loading a second redundant YOLO model.
-        ml_driver_state = DriverStateDetector(enable_phone_detection=False)
-        # Same FrameVisualizer used by ml/demo_pipeline.py — reused directly (not
-        # reimplemented) so the live backend's "Demo" output is pixel-for-pixel
-        # the same drawing code a local `python ml/demo_pipeline.py` run produces.
-        ml_visualizer = FrameVisualizer()
-        ml_available = True
-        logger.info("Jobs ML pipeline initialized. OCR engine: %s", ml_ocr.engine_name)
-    except Exception as e:
-        logger.error("Failed to initialize ML pipeline in jobs.py: %s", e)
-        ml_available = False
-    return ml_available
-
-
-_DEFAULT_CALIBRATION = {
-    "stop_line_y": 380,
-    "parking_zones": [],
-    "traffic_direction": "down",
-    "wrong_side_zone": [],
-    "calibrated": False,
-}
+def _ensure_ml() -> bool:
+    """Return True when the shared ML registry loaded all components."""
+    return get_ml_registry().available
 
 
 async def _resolve_calibration(camera_id: Optional[str]) -> dict:
-    """
-    Look up a registered camera's stop-line/parking-zone/traffic-direction
-    calibration. Falls back to generic defaults (tagged calibrated=False)
-    when no camera_id is given or it isn't registered — e.g. ad-hoc uploads
-    with no associated camera.
-    """
+    """Look up per-camera calibration; fall back to defaults when unknown."""
     if not camera_id:
-        return dict(_DEFAULT_CALIBRATION)
+        from ..services.calibration_service import _DEFAULTS
+        return {**_DEFAULTS, "calibrated": False}
     async with AsyncSessionLocal() as session:
-        cam = (await session.execute(
-            select(CameraModel).where(CameraModel.id == camera_id)
-        )).scalar_one_or_none()
-    if not cam:
-        return dict(_DEFAULT_CALIBRATION)
-    return {
-        "stop_line_y": cam.stop_line_y,
-        "parking_zones": json.loads(cam.parking_zones or "[]"),
-        "traffic_direction": cam.traffic_direction or "down",
-        "wrong_side_zone": json.loads(cam.wrong_side_zone or "[]"),
-        "calibrated": True,
-    }
+        svc = CalibrationService(session)
+        return await svc.resolve(camera_id)
 
 
 def _apply_calibration(calibration: dict) -> None:
-    """
-    Point the shared ml_classifier singleton at this job's camera calibration.
-
-    NOTE: ml_classifier is a module-level singleton (avoids reloading model
-    weights per job). Setting these attributes is not concurrency-safe if
-    multiple jobs for *different* cameras are processed in true parallel —
-    acceptable for this single-process backend's current background-task
-    model, but worth flagging if jobs ever move to a worker pool.
-    """
-    ml_classifier.stop_line_y = calibration["stop_line_y"]
-    ml_classifier.parking_zones = calibration["parking_zones"]
-    ml_classifier.traffic_direction = calibration["traffic_direction"]
-    ml_classifier.wrong_side_zone = calibration["wrong_side_zone"]
+    """Apply calibration values to the shared ML classifier singleton."""
+    ml = get_ml_registry()
+    if not ml.classifier:
+        return
+    ml.classifier.stop_line_y       = calibration["stop_line_y"]
+    ml.classifier.parking_zones     = calibration["parking_zones"]
+    ml.classifier.traffic_direction = calibration["traffic_direction"]
+    ml.classifier.wrong_side_zone   = calibration["wrong_side_zone"]
 
 
 # ---------------------------------------------------------------------------
@@ -309,15 +241,20 @@ def _draw_demo_visualization(
     `python ml/demo_pipeline.py --input <this image>` would produce — not a
     re-derived approximation.
     """
+    from ..services.ml_registry import get_ml_registry
+    ml = get_ml_registry()
+    if not ml.visualizer:
+        return frame.copy()
+
     demo = frame.copy()
-    demo = ml_visualizer.draw_detections(demo, [d.to_dict() for d in detections])
+    demo = ml.visualizer.draw_detections(demo, [d.to_dict() for d in detections])
     if violations:
-        demo = ml_visualizer.draw_violations(demo, violations)
-    ml_visualizer.draw_stop_line(demo, stop_line_y)
+        demo = ml.visualizer.draw_violations(demo, violations)
+    ml.visualizer.draw_stop_line(demo, stop_line_y)
     if driver_alerts:
-        ml_visualizer.draw_driver_alert(demo, driver_alerts[0].alert_type)
-    ml_visualizer.draw_tier_badge(demo, tier, action, (10, 90))
-    ml_visualizer.draw_plate_result(demo, plate_text or "UNCLEAR", plate_conf, plate_valid)
+        ml.visualizer.draw_driver_alert(demo, driver_alerts[0].alert_type)
+    ml.visualizer.draw_tier_badge(demo, tier, action, (10, 90))
+    ml.visualizer.draw_plate_result(demo, plate_text or "UNCLEAR", plate_conf, plate_valid)
     return demo
 
 

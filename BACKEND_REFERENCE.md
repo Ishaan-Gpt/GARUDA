@@ -10,19 +10,18 @@ GARUDA is an **edge-native, automated traffic violation detection system**. A ca
 
 ---
 
-## Status as of 2026-06-21
+## Status as of 2026-06-22 (post-refactor)
 
 - **Backend**: all endpoints below are real and working against a live SQLite DB — not mocked. 13 routers, 2 WebSocket endpoints, auth + RBAC, an audit trail, and a local LLM ops agent are all wired into `backend/main.py`.
 - **ML models**: 7 trained weight files are loaded and used in the live pipeline (not placeholders) — see the model table below for exact accuracy/mAP numbers pulled from their metrics JSON files.
 - **Live data path**: `POST /api/v1/jobs/upload` runs the real ML pipeline (preprocess → detect → classify → OCR) in a background task and writes violations straight to the DB. `python ml/demo_pipeline.py --input <image> --backend-url http://localhost:8000` is the CLI equivalent, useful for local debugging. `/debug/inject-violation` still exists for pure UI testing with fake data — don't confuse its output with real detections.
 - **Not implemented**: cross-camera vehicle re-identification; federated learning is wired (`ml/federated/`) but doesn't retrain from real edge data yet; there is **no standalone evaluation harness** that reports Accuracy/Precision/Recall/F1/mAP end-to-end across the whole pipeline — only per-model training metrics exist (see "ps.txt Coverage" below).
-- **2026-06-21 fixes**:
-  - Helmet confidence was hardcoded to 0.50 regardless of what the model actually detected — every helmet hit looked identical. Now uses `helmet_best.pt`'s real per-box confidence.
-  - Triple-riding used to derive its rider count from that same helmet model's head detections, which is the wrong signal for a different problem — it's now fully decoupled and runs its own IoU/position rider-vehicle association (`associate_riders_with_vehicles()`), independent of helmet detection.
-  - `check_seatbelt()` had no upper bound on vehicle bbox size — an oversized/frame-filling truck box (no real windshield visible in that crop) was getting fed through the windshield-ROI heuristic and returning an overconfident false-positive `no_seatbelt @ 1.00`. Now skipped when a vehicle's bbox exceeds 35% of the frame area.
-  - `_check_wrong_side_static()`'s docstring falsely claimed it does lane-line detection — it's actually a position-only proxy (no heading signal in a single still frame). Docstring corrected, and which half of the frame counts as "wrong side" is now a per-camera `wrong_side_lane` setting (like `stop_line_y`) instead of a silent hardcoded constant.
-  - `_check_stop_line_static()` had no confidence gate on the signal-state detection — a low-confidence signal guess could trigger a violation. Now requires `signal_conf >= 0.55`, and reported confidence scales with it.
-  - See "ML Pipeline — Violation Types" below for the exact mechanism on each.
+- **2026-06-22 architectural refactor**:
+  - Extracted `cameras`, `vehicles`, `analytics`, `stream`, and `debug` from the 707-line `_routers.py` god-file into their own standalone routers.
+  - Created `backend/services/` layer with three reusable services: `MLRegistry` (shared model singleton), `CalibrationService` (camera calibration), `ChallanService` (violation packaging + tier routing).
+  - Eliminated the duplicate-ML-singleton bug — both `jobs.py` and `stream.py`'s patrol WebSocket now share one `MLRegistry` instance loaded via `get_ml_registry()`.
+  - Reorganised `ml/models/weights/` into `detection/`, `violations/`, `ocr/`, `metrics/` subdirectories.
+  - All weight paths updated in `detector.py`, `ocr.py`, and `violation_classifier.py`.
 
 ---
 
@@ -107,27 +106,114 @@ Image / Video / Camera Feed
 ```
 
 Two entry points run this pipeline today:
-1. **`backend/api/jobs.py`** (`_ensure_ml()`) — lazily initializes its own pipeline instance, used by `POST /jobs` and `POST /jobs/upload`. This is the path the dashboard's upload flow hits.
+1. **`backend/api/jobs.py`** — uses `get_ml_registry()` from `backend/services/ml_registry.py` (shared singleton), used by `POST /jobs` and `POST /jobs/upload`. This is the path the dashboard's upload flow hits.
 2. **`ml/demo_pipeline.py`** — standalone CLI for local testing/debugging, optionally POSTs results to the backend via `--backend-url`.
 
-They use the same modules but are separate object instances — there is no shared singleton between the demo CLI and the running server.
+The patrol WebSocket (`backend/api/stream.py → ws_patrol`) also shares the same `MLRegistry` singleton — no separate model instances are loaded.
 
 ---
 
-## ML Model Inventory (`ml/models/weights/`)
+## Backend Directory Structure (post-refactor)
+
+```
+backend/
+├── main.py                       FastAPI app — CORS, lifespan, router registration
+├── core/
+│   ├── config.py                 Settings (DATABASE_URL, SECRET_KEY, SMTP creds)
+│   ├── database.py               ORM models, async engine, CRUD helpers
+│   ├── auth_utils.py             JWT creation, password hashing, RBAC
+│   ├── email_service.py          SMTP email dispatch
+│   └── agent_executor.py         Gemma-2 local LLM ops-agent
+├── models/
+│   └── schemas.py                Pydantic request/response schemas
+├── services/                     ← NEW business-logic layer
+│   ├── ml_registry.py            Shared ML singleton (preprocessor, detector, OCR, classifier)
+│   ├── calibration_service.py    Per-camera calibration resolver (stop_line_y, zones, direction)
+│   └── challan_service.py        Violation packaging, tier routing, DB persistence
+└── api/
+    ├── cameras.py                CRUD for camera registry + calibration config
+    ├── vehicles.py               Vehicle lookup + repeat-offender list
+    ├── analytics.py              Summary, trends, heatmap endpoints
+    ├── stream.py                 /ws/feed (dashboard) + /ws/patrol (mobile)
+    ├── debug.py                  Inject test violation, pipeline status, ML registry health
+    ├── jobs.py                   Job queue — upload, process, status, results
+    ├── violations.py             Ingest + list violations
+    ├── reviews.py                Officer review workflow
+    ├── evidence.py               Evidence image serving
+    ├── auth.py                   Login, token refresh, registration
+    ├── users.py                  User management
+    ├── audit_logs.py             Audit trail
+    └── agent.py                  AI ops-agent chat endpoint
+```
+
+## ML Directory Structure (post-refactor)
+
+```
+ml/
+├── pipeline/                     Inference modules (unchanged)
+│   ├── preprocessor.py           CLAHE + denoise + gamma
+│   ├── detector.py               YOLOv8m vehicle/person/phone detector
+│   ├── tracker.py                ByteTrack per-camera state
+│   ├── violation_classifier.py   9 violation types — all sub-classifiers here
+│   ├── confidence_router.py      3-tier routing thresholds
+│   ├── driver_state.py           MediaPipe FaceMesh drowsiness/phone
+│   └── ocr.py                    2-stage plate detection + OCR engine fallback chain
+├── models/
+│   ├── helmet_cnn.py             CNN architecture definition
+│   └── weights/
+│       ├── detection/            Primary detector weights
+│       │   └── yolov8m.pt
+│       ├── violations/           Per-violation-type weights
+│       │   ├── helmet_best.pt
+│       │   ├── helmet_cnn.pt
+│       │   ├── seatbelt_classifier.pt
+│       │   └── traffic_lights_yolov8x.pt
+│       ├── ocr/                  Plate detector weights
+│       │   ├── plate_koushi.pt
+│       │   ├── plate_yasir.pt
+│       │   └── plate_yolov8_moin.pt
+│       └── metrics/              Training artefacts (not loaded at runtime)
+│           ├── helmet_metrics.json
+│           ├── plate_metrics.json
+│           └── *.png             Training curves
+├── federated/                    Federated learning client/server
+├── training/                     Training scripts + data prep
+└── utils/
+    ├── evidence.py               Evidence packaging helper
+    └── visualizer.py             Frame annotation renderer
+```
+
+---
+
+## ML Model Inventory
+
+### `ml/models/weights/detection/`
+
+| File | Role | Loaded by |
+|------|------|-----------|
+| `yolov8m.pt` | Primary vehicle/person/phone detector | `ml/pipeline/detector.py` |
+
+### `ml/models/weights/violations/`
 
 | File | Role | Verified metrics | Loaded by |
 |------|------|-------------------|-----------|
-| `yolov8m.pt` | Primary vehicle/person/phone detector | — | `ml/pipeline/detector.py` |
-| `helmet_best.pt` | **Primary** helmet check ONLY — AICity Track-5 9-class detector (helmet / head / person), runs on full image. Not used by triple-riding (see that row below) | mAP@0.5 = 0.648 (per in-code docstring) | `AIHelmetViolationDetector` in `violation_classifier.py:223` |
-| `helmet_cnn.pt` | Fallback helmet classifier — binary CNN on head crop, used when `helmet_best.pt` can't be loaded or as the `HelmetClassifier` crop-fallback | accuracy=0.8744, precision=0.8675, recall=0.8182, **f1=0.8421** (n=215, see `helmet_metrics.json`) | `HelmetClassifier` in `violation_classifier.py:127` |
-| `plate_koushi.pt` | Plate detector Stage-1 (best spatial coverage) | mAP50=0.8816, mAP50-95=0.5102, precision=0.8435, recall=0.8367 @ 640px, 60 epochs (see `plate_metrics.json`) | `ml/pipeline/ocr.py:131` |
-| `plate_yasir.pt` | Plate detector Stage-2 (confirms/refines Stage-1 crop) | — | `ml/pipeline/ocr.py:132` |
-| `plate_yolov8_moin.pt` | Legacy single-stage plate detector, used only if `plate_koushi.pt` is missing | — | `backend/api/jobs.py:59-61` fallback chain |
+| `helmet_best.pt` | **Primary** helmet check — AICity Track-5 9-class detector (helmet / head / person), runs on full image. Not used by triple-riding | mAP@0.5 = 0.648 | `AIHelmetViolationDetector` in `violation_classifier.py` |
+| `helmet_cnn.pt` | Fallback helmet classifier — binary CNN on head crop | accuracy=0.8744, precision=0.8675, recall=0.8182, **f1=0.8421** (n=215) | `HelmetClassifier` in `violation_classifier.py` |
 | `seatbelt_classifier.pt` | Windshield-ROI seatbelt classifier (YOLOv11s) | — | `ViolationClassifier._load_seatbelt_model` |
-| `traffic_lights_yolov8x.pt` | Traffic signal state detector (trained on DTLD+LISA+BSTLD+HDTLR) | — | `MLSignalStateDetector` in `violation_classifier.py` |
+| `traffic_lights_yolov8x.pt` | Traffic signal state detector (DTLD+LISA+BSTLD+HDTLR) | — | `MLSignalStateDetector` in `violation_classifier.py` |
 
-OCR **text recognition** (separate from plate *detection* above) tries engines in this order until one is importable: `fast-plate-ocr` (`cct-s-v2-global-model`) → `PaddleOCR` → `EasyOCR` → `Tesseract`. See `ml/pipeline/ocr.py:174-243`.
+### `ml/models/weights/ocr/`
+
+| File | Role | Verified metrics | Loaded by |
+|------|------|-------------------|-----------|
+| `plate_koushi.pt` | Plate detector Stage-1 (best spatial coverage) | mAP50=0.8816, mAP50-95=0.5102 | `ml/pipeline/ocr.py` |
+| `plate_yasir.pt` | Plate detector Stage-2 (confirms/refines Stage-1 crop) | — | `ml/pipeline/ocr.py` |
+| `plate_yolov8_moin.pt` | Legacy fallback plate detector if Stage-1 missing | — | `ml/pipeline/ocr.py` (fallback chain) |
+
+### `ml/models/weights/metrics/`
+Training-time artefacts only — **not loaded at runtime**. Includes `helmet_metrics.json`, `plate_metrics.json`, and training curve PNGs.
+
+OCR **text recognition** (separate from plate *detection*) tries engines in order: `fast-plate-ocr` → `PaddleOCR` → `EasyOCR` → `Tesseract`. See `ml/pipeline/ocr.py`.
 
 ---
 
