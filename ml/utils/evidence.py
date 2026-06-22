@@ -190,7 +190,10 @@ class EvidencePackager:
                 # Label
                 vtype = v.get("type", "violation").replace("_", " ").upper()
                 conf  = v.get("confidence", 0)
+                plate_txt = v.get("plate_text")
                 label = f"{vtype}  {conf * 100:.0f}%"
+                if plate_txt and plate_txt != "UNCLEAR":
+                    label += f" [{plate_txt}]"
                 lw    = len(label) * 8 + 10
                 label_y1 = max(0, y1 - 30)
                 cv2.rectangle(frame, (x1, label_y1), (x1 + lw, y1), color, -1)

@@ -78,37 +78,39 @@ def _resolve_weight(path: Path, cli_override: str | None, fallback: Path | None 
 # Backend push (ML pipeline -> FastAPI -> dashboard)
 # ---------------------------------------------------------------------------
 
-def _build_ingest_payload(decision, package: dict, plate_info: dict) -> dict:
-    """Map a routed decision + evidence package onto backend's ViolationIngestRequest schema."""
-    record = package["record"]
-    vehicle = dict(record["vehicle"])
-    vehicle["vehicle_class"] = vehicle.pop("class", "unknown")
-    vehicle.pop("plate_raw", None)
-
-    return {
-        "violation_id": decision.violation_id,
-        "tier": decision.tier,
-        "action": decision.action,
-        "timestamp": decision.timestamp,
-        "camera": record["camera"],
-        "vehicle": vehicle,
-        "violations": record["violations"],
-        "driver_state": record["driver_state"],
-        "evidence": record["evidence"],
-        "processing": record["processing"],
-        "plate": plate_info or None,
-        "escalation_reason": decision.escalation_reason,
-    }
-
-
-def _push_to_backend(decision, package: dict, plate_info: dict, backend_url: str) -> None:
+def _push_to_backend(
+    violation_id: str,
+    tier: int,
+    action: str,
+    package: dict,
+    plate_info: dict,
+    backend_url: str,
+) -> None:
     """POST a violation to the live backend so the dashboard reflects real ML output."""
     try:
         import httpx
-        payload = _build_ingest_payload(decision, package, plate_info)
+        record = package["record"]
+        vehicle = dict(record["vehicle"])
+        vehicle["vehicle_class"] = vehicle.pop("class", "unknown")
+        vehicle.pop("plate_raw", None)
+
+        payload = {
+            "violation_id": violation_id,
+            "tier": tier,
+            "action": action,
+            "timestamp": record["timestamp"],
+            "camera": record["camera"],
+            "vehicle": vehicle,
+            "violations": record["violations"],
+            "driver_state": record["driver_state"],
+            "evidence": record["evidence"],
+            "processing": record["processing"],
+            "plate": plate_info or None,
+            "escalation_reason": "",
+        }
         resp = httpx.post(f"{backend_url}/api/v1/violations/ingest", json=payload, timeout=3.0)
         resp.raise_for_status()
-        logger.info("      Pushed to backend: %s", decision.violation_id)
+        logger.info("      Pushed to backend: %s", violation_id)
     except Exception as e:
         logger.warning("      Could not push to backend (%s): %s", backend_url, e)
 
@@ -194,9 +196,13 @@ def run_image(args) -> None:
     logger.info("[5/6] Reading license plates…")
     plate_info = {"formatted_text": "", "confidence": 0.0, "is_valid": False, "state": "Unknown"}
     for vehicle in vehicles:
-        plate_region = ocr.detect_plate_region(processed, vehicle.bbox)
-        if plate_region is not None and plate_region.size > 0:
-            result = ocr.read_plate(plate_region)
+        x1, y1, x2, y2 = map(int, vehicle.bbox)
+        h_img, w_img = processed.shape[:2]
+        veh_crop = processed[max(0, y1):min(h_img, y2), max(0, x1):min(w_img, x2)]
+        if veh_crop.size > 0:
+            result = ocr.read_plate_from_vehicle(veh_crop)
+            vehicle.plate_text = result.formatted_text or "UNCLEAR"
+            vehicle.plate_conf = result.confidence
             if result.confidence > plate_info.get("confidence", 0):
                 plate_info = result.to_dict()
     logger.info(
@@ -212,29 +218,41 @@ def run_image(args) -> None:
     logger.info("[6/6] Routing decisions…")
     decisions = router.route_batch(all_violations, plate_info, DEMO_CAMERA)
 
-    results_summary = []
-    for decision in decisions:
-        tier_label = {1: "✅ AUTO-CHALLAN", 2: "⚠  HUMAN REVIEW", 3: "📝 LOGGED"}.get(decision.tier, "?")
-        logger.info("      %s | %s | ID: %s", tier_label, decision.action, decision.violation_id)
+    # Associate plate with each specific violation
+    for v in all_violations:
+        v_plate = "UNCLEAR"
+        for vehicle in vehicles:
+            if [round(x, 2) for x in vehicle.bbox] == [round(x, 2) for x in v.bbox]:
+                v_plate = getattr(vehicle, "plate_text", "UNCLEAR")
+                break
+        v.plate_text = v_plate
 
-        if decision.tier == 2 and args.verbose:
-            print("\n" + router.build_whatsapp_alert(decision) + "\n")
+    # Determine collapsed routing tier/action across all violations in the frame
+    if not decisions:
+        tier, action = 1, "PASSED"
+    elif all(d.tier == 1 for d in decisions):
+        tier, action = 1, "AUTO_CHALLAN"
+    else:
+        tier, action = 2, "HUMAN_REVIEW"
 
-        # Generate evidence (reuse the router's violation_id so DB + files agree)
-        package = packager.create_package(
-            frame=frame,
-            violations=[decision.violation.to_dict()],
-            plate_info=plate_info,
-            camera_info=DEMO_CAMERA,
-            driver_alerts=[a.to_dict() for a in driver_alerts],
-            processing_info={"time_ms": round(elapsed_ms, 1), "model": "yolov8m"},
-            violation_id=decision.violation_id,
-        )
-        logger.info("      Evidence: %s", package["annotated_image_path"])
-        results_summary.append(package)
+    # Single violation ID for the whole frame
+    import datetime as dt
+    vid = decisions[0].violation_id if decisions else f"VIO-BLR-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:6].upper()}"
 
-        if args.backend_url:
-            _push_to_backend(decision, package, plate_info, args.backend_url)
+    # Generate one evidence package with all violations
+    package = packager.create_package(
+        frame=frame,
+        violations=[d.violation.to_dict() for d in decisions],
+        plate_info=plate_info,
+        camera_info=DEMO_CAMERA,
+        driver_alerts=[a.to_dict() for a in driver_alerts],
+        processing_info={"time_ms": round(elapsed_ms, 1), "model": "yolov8m"},
+        violation_id=vid,
+    )
+    logger.info("      Evidence: %s", package["annotated_image_path"])
+
+    if args.backend_url and decisions:
+        _push_to_backend(vid, tier, action, package, plate_info, args.backend_url)
 
     # --- Display ---
     display = frame.copy()
@@ -246,9 +264,7 @@ def run_image(args) -> None:
     if driver_alerts:
         visualizer.draw_driver_alert(display, driver_alerts[0].alert_type)
 
-    if decisions:
-        d = decisions[0]
-        visualizer.draw_tier_badge(display, d.tier, d.action, (10, 90))
+    visualizer.draw_tier_badge(display, tier, action, (10, 90))
 
     plate_text = plate_info.get("formatted_text") or "UNCLEAR"
     visualizer.draw_plate_result(
@@ -347,13 +363,24 @@ def run_video(args) -> None:
         # OCR — read plate of each vehicle, keep best result this frame
         plate_info = {"formatted_text": "", "confidence": 0.0, "is_valid": False}
         for vehicle in vehicles:
-            plate_region = ocr.detect_plate_region(processed, vehicle.bbox)
-            if plate_region is not None and plate_region.size > 0:
-                result = ocr.read_plate(plate_region)
+            x1, y1, x2, y2 = map(int, vehicle.bbox)
+            h_img, w_img = processed.shape[:2]
+            veh_crop = processed[max(0, y1):min(h_img, y2), max(0, x1):min(w_img, x2)]
+            if veh_crop.size > 0:
+                result = ocr.read_plate_from_vehicle(veh_crop)
+                vehicle.plate_text = result.formatted_text or "UNCLEAR"
+                vehicle.plate_conf = result.confidence
                 if result.confidence > plate_info.get("confidence", 0):
                     plate_info = result.to_dict()
 
         for v in violations:
+            v_plate = "UNCLEAR"
+            for vehicle in vehicles:
+                if [round(x, 2) for x in vehicle.bbox] == [round(x, 2) for x in v.bbox]:
+                    v_plate = getattr(vehicle, "plate_text", "UNCLEAR")
+                    break
+            v.plate_text = v_plate
+
             violations_total += 1
             decisions = router.route_batch([v], plate_info, DEMO_CAMERA)
             for d in decisions:

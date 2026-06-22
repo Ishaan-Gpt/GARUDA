@@ -69,6 +69,7 @@ export interface ViolationItem {
   tier: number;
   reviewStatus: "pending" | "auto_confirmed" | "confirmed" | "rejected";
   escalated?: boolean;
+  plateText?: string;
 }
 
 export interface ProcessingJob {
@@ -265,6 +266,7 @@ export const PlatformProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           tier: rv.tier ?? 2,
           reviewStatus: rv.review_status || "pending",
           escalated: !!rv.escalated,
+          plateText: rv.plate_text,
         }))
       : undefined;
 

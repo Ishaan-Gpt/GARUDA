@@ -263,7 +263,10 @@ def _draw_annotated_evidence(
                 cv2.line(annotated, (cx, cy), (cx, cy + dy), color, 4)
             vtype = v.get("type", "violation").replace("_", " ").upper()
             conf = v.get("confidence", 0)
+            plate_txt = v.get("plate_text")
             label = f"{vtype}  {conf * 100:.0f}%"
+            if plate_txt and plate_txt != "UNCLEAR":
+                label += f" [{plate_txt}]"
             lw = len(label) * 8 + 10
             label_y1 = max(0, y1 - 30)
             cv2.rectangle(annotated, (x1, label_y1), (x1 + lw, y1), color, -1)
@@ -359,6 +362,8 @@ def _classify_and_package(
         veh_crop = processed[max(0, y1):min(h_img, y2), max(0, x1):min(w_img, x2)]
         if veh_crop.size > 0:
             ocr_result = ml_ocr.read_plate_from_vehicle(veh_crop)
+            veh.plate_text = ocr_result.formatted_text or "UNCLEAR"
+            veh.plate_conf = ocr_result.confidence
             all_plates.append({
                 "plate_text": ocr_result.formatted_text or "UNCLEAR",
                 "confidence": round(ocr_result.confidence, 3),
@@ -419,6 +424,12 @@ def _classify_and_package(
     for v in violations:
         v_type_display = V_TYPE_DISPLAY.get(v.violation_type.value, v.violation_type.value)
         v_tier = 1 if v.confidence >= TIER1_AUTO_CHALLAN else 2
+        # Match vehicle by bbox to assign its specific plate
+        v_plate = "UNCLEAR"
+        for p in all_plates:
+            if p["bbox"] == list(map(int, v.bbox)):
+                v_plate = p["plate_text"]
+                break
         violation_dicts.append({
             "type": v_type_display,
             "confidence": v.confidence,
@@ -428,6 +439,7 @@ def _classify_and_package(
             "metadata": v.metadata if hasattr(v, "metadata") else {},
             "tier": v_tier,
             "review_status": "auto_confirmed" if v_tier == 1 else "pending",
+            "plate_text": v_plate,
         })
 
     # Record-level tier/action reflects the WORST case across all violations

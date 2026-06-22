@@ -73,9 +73,12 @@ class FrameVisualizer:
             cls   = det.get("class_name", "vehicle")
             conf  = det.get("confidence", 0.0)
             tid   = det.get("track_id")
+            plate_txt = det.get("plate_text")
 
             label = f"#{tid} {cls}" if tid is not None else cls
-            if show_conf:
+            if plate_txt and plate_txt != "UNCLEAR":
+                label += f" [{plate_txt}]"
+            elif show_conf:
                 label += f" {conf * 100:.0f}%"
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), Colors.GREEN, 2)

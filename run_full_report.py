@@ -52,12 +52,14 @@ def run(image_path: str, out_prefix: str, out_dir: str = "result") -> None:
     best_plate_info = {"formatted_text": "", "confidence": 0.0, "is_valid": False}
     best_plate_crop = None
     for vehicle in vehicles:
-        plate_region = ocr.detect_plate_region(processed, vehicle.bbox)
-        if plate_region is not None and plate_region.size > 0:
-            result = ocr.read_plate(plate_region)
+        x1, y1, x2, y2 = map(int, vehicle.bbox)
+        h_img, w_img = processed.shape[:2]
+        veh_crop = processed[max(0, y1):min(h_img, y2), max(0, x1):min(w_img, x2)]
+        if veh_crop.size > 0:
+            result = ocr.read_plate_from_vehicle(veh_crop)
             if result.confidence > best_plate_info.get("confidence", 0):
                 best_plate_info = result.to_dict()
-                best_plate_crop = plate_region
+                best_plate_crop = ocr.detect_plate_region(processed, vehicle.bbox)
 
     decisions = router.route_batch(all_violations, best_plate_info, {
         "camera_id": "BLR-CAM-DEMO-001",

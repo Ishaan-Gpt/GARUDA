@@ -110,7 +110,7 @@ class ViolationResult:
         )
 
     def to_dict(self) -> dict:
-        return {
+        res = {
             "type": self.violation_type.value,
             "confidence": self.confidence,
             "severity": self.severity,
@@ -118,6 +118,9 @@ class ViolationResult:
             "bbox": [round(v, 2) for v in self.bbox],
             "metadata": self.metadata,
         }
+        if hasattr(self, "plate_text") and self.plate_text:
+            res["plate_text"] = self.plate_text
+        return res
 
 
 # ---------------------------------------------------------------------------
@@ -779,20 +782,21 @@ class ViolationClassifier:
         vehicle: Detection,
         persons: List[Detection],
         rider_map: Optional[Dict[int, List[Detection]]] = None,
+        ai_result: Optional[Tuple[bool, float, int]] = None,
     ) -> Optional[ViolationResult]:
         """
-        Count persons on a 2-wheeler using the IoU + position rider-vehicle
-        association heuristic (see associate_riders_with_vehicles) — independent
-        of the helmet model. This mirrors the approach in
-        temp/AI_Traffic_Violation_Detection_triple_riding_detection/detect_triple_riding.py
-        (group_riders_with_vehicles): person + motorbike detections from the main
-        detector are grouped by IoU/position, not by the helmet classifier's head count.
+        Count persons on a 2-wheeler.
+        Prioritizes the IoU + position association heuristic (Vignesh's).
+        Falls back to the AI helmet violation detector model (helmet_best.pt)
+        if it is loaded and rider_map/heuristic count is not available.
         """
         if not vehicle.is_two_wheeler:
             return None
 
         if rider_map is not None:
             rider_count = len(rider_map.get(id(vehicle), []))
+        elif ai_result is not None and self.ai_helmet._model is not None:
+            rider_count = ai_result[2]
         else:
             # Last-resort fallback if no rider_map was precomputed
             rider_count = len(self.associate_riders_with_vehicles([vehicle], persons).get(id(vehicle), []))
@@ -923,7 +927,7 @@ class ViolationClassifier:
     ) -> Optional[ViolationResult]:
         """
         Detect wrong-side driving: a vehicle moving against this camera's
-        calibrated legal direction of travel.
+        calibrated legal direction of travel inside the wrong_side_zone.
 
         Parameters
         ----------
@@ -932,6 +936,19 @@ class ViolationClassifier:
                     seen by this camera. Falls back to self.traffic_direction
                     (set per-camera by the caller) when not given explicitly.
         """
+        if not self.wrong_side_zone:
+            return None
+
+        # Check vehicle center lies in calibrated wrong_side_zone
+        cx = (latest_bbox[0] + latest_bbox[2]) / 2
+        cy = (latest_bbox[1] + latest_bbox[3]) / 2
+        in_zone = any(
+            zx1 <= cx <= zx2 and zy1 <= cy <= zy2
+            for zx1, zy1, zx2, zy2 in self.wrong_side_zone
+        )
+        if not in_zone:
+            return None
+
         direction = direction if direction in self.VALID_DIRECTIONS else self.traffic_direction
         vx, vy = velocity
         speed = (vx ** 2 + vy ** 2) ** 0.5
@@ -1221,7 +1238,7 @@ class ViolationClassifier:
                 if v:
                     results.append(v)
 
-                v = self.check_triple_riding(vehicle, persons, rider_map=rider_map)
+                v = self.check_triple_riding(vehicle, persons, rider_map=rider_map, ai_result=ai_result)
                 if v:
                     results.append(v)
 
@@ -1354,64 +1371,27 @@ class ViolationClassifier:
         Presence inside the camera's calibrated `wrong_side_zone` — the lane(s)
         reserved for oncoming traffic only — is itself the violation evidence
         in a single photo; no motion is needed to confirm it.
-
-        If no `wrong_side_zone` is configured, falls back to road-centre split:
-        vehicles in the left or right half (depending on `wrong_side_lane`) of the frame
-        are flagged as wrong-side candidates.
         """
+        if not self.wrong_side_zone:
+            return None
+
         cx = (bbox[0] + bbox[2]) / 2
         cy = (bbox[1] + bbox[3]) / 2
 
-        if self.wrong_side_zone:
-            in_zone = any(
-                zx1 <= cx <= zx2 and zy1 <= cy <= zy2
-                for zx1, zy1, zx2, zy2 in self.wrong_side_zone
-            )
-            if not in_zone:
-                return None
-            return ViolationResult.create(
-                ViolationType.WRONG_SIDE_DRIVING,
-                confidence=0.75,  # Calibrated zone presence — stronger evidence
-                bbox=bbox,
-                metadata={
-                    "centre_x": round(cx, 1),
-                    "centre_y": round(cy, 1),
-                    "method": "calibrated_zone",
-                },
-            )
-
-        # Fallback to wrong_side_lane frame-position heuristic
-        if frame_width is None or frame_width <= 0:
+        in_zone = any(
+            zx1 <= cx <= zx2 and zy1 <= cy <= zy2
+            for zx1, zy1, zx2, zy2 in self.wrong_side_zone
+        )
+        if not in_zone:
             return None
-
-        vw = bbox[2] - bbox[0]
-        vh = bbox[3] - bbox[1]
-
-        # Skip parked / edge vehicles — must be clearly within the wrong-side half
-        road_left  = frame_width * 0.10
-        road_right = frame_width * 0.90
-        if cx < road_left or cx > road_right:
-            return None
-
-        road_centre = frame_width * 0.50
-        in_flagged_half = cx < road_centre if self.wrong_side_lane == "left" else cx > road_centre
-        if not in_flagged_half:
-            return None
-
-        # Vehicle must be large enough in frame to be confidently close
-        if vw * vh < 8000:
-            return None
-
-        conf = 0.60  # Moderate — position-only proxy
         return ViolationResult.create(
             ViolationType.WRONG_SIDE_DRIVING,
-            confidence=conf,
+            confidence=0.75,  # Calibrated zone presence — stronger evidence
             bbox=bbox,
             metadata={
                 "centre_x": round(cx, 1),
-                "frame_width": frame_width,
-                "wrong_side_lane": self.wrong_side_lane,
-                "method": "static_lane_heuristic",
+                "centre_y": round(cy, 1),
+                "method": "calibrated_zone",
             },
         )
 

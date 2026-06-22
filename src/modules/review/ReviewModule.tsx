@@ -294,7 +294,7 @@ export default function ReviewModule() {
                       }}>
                         <div>
                           <div style={{ fontSize: "11px", fontWeight: "600", color: SEVERITY_COLOR[item.severity] || "var(--text-primary)" }}>
-                            {item.type}
+                            {item.type} {item.plateText && item.plateText !== "UNCLEAR" && `[${item.plateText}]`}
                           </div>
                           <div style={{ fontSize: "9px", color: "var(--text-muted)" }}>
                             {item.confidence}% confidence · ₹{item.fineAmountInr}

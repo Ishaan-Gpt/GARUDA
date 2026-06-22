@@ -49,7 +49,7 @@ class Detection:
     track_id    : ByteTrack persistent ID (None for single-frame detect)
     """
 
-    __slots__ = ("bbox", "confidence", "class_id", "class_name", "track_id")
+    __slots__ = ("bbox", "confidence", "class_id", "class_name", "track_id", "plate_text", "plate_conf")
 
     def __init__(
         self,
@@ -63,6 +63,8 @@ class Detection:
         self.class_id = int(class_id)
         self.class_name = ALL_TRAFFIC_CLASS_IDS.get(self.class_id, f"cls_{class_id}")
         self.track_id = track_id
+        self.plate_text = None
+        self.plate_conf = 0.0
 
     # ------------------------------------------------------------------
     # Geometry helpers
@@ -114,13 +116,17 @@ class Detection:
         return self.bbox[0] <= x <= self.bbox[2] and self.bbox[1] <= y <= self.bbox[3]
 
     def to_dict(self) -> dict:
-        return {
+        res = {
             "bbox": [round(v, 2) for v in self.bbox],
             "confidence": round(self.confidence, 4),
             "class_id": self.class_id,
             "class_name": self.class_name,
             "track_id": self.track_id,
         }
+        if self.plate_text:
+            res["plate_text"] = self.plate_text
+            res["plate_conf"] = round(self.plate_conf, 4)
+        return res
 
     def __repr__(self) -> str:
         tid = f" id={self.track_id}" if self.track_id is not None else ""
