@@ -44,6 +44,9 @@ sqlalchemy>=2.0.0            # Async ORM
 aiosqlite>=0.19.0            # SQLite async driver (dev)
 asyncpg>=0.29.0              # PostgreSQL async driver (prod)
 python-multipart>=0.0.6      # File upload support
+imageio-ffmpeg>=0.6.0        # Bundled static ffmpeg binary — re-encodes rendered
+                              # videos to browser-playable H.264 (OpenCV's own
+                              # mp4v/avc1 VideoWriter output isn't browser-decodable)
 
 # ===== Alerts =====
 twilio>=8.0.0                # WhatsApp/SMS alerts (optional)

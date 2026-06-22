@@ -98,6 +98,7 @@ class MLRegistry:
     ocr: Any = None
     classifier: Any = None
     driver_state: Any = None
+    visualizer: Any = None
     error: str = ""
 
 
@@ -135,6 +136,8 @@ def _load_registry() -> MLRegistry:
             plate_path,
         )
 
+        from ml.utils.visualizer import FrameVisualizer
+
         reg.preprocessor  = ImagePreprocessor()
         reg.detector      = VehicleDetector(model_path=None, device="cpu")
         reg.ocr           = PlateOCR(plate_detector_weights=plate_path)
@@ -143,6 +146,7 @@ def _load_registry() -> MLRegistry:
             helmet_weights_path=helmet_path,
         )
         reg.driver_state  = DriverStateDetector()
+        reg.visualizer    = FrameVisualizer()
         reg.available     = True
         logger.info("MLRegistry: all components loaded successfully.")
 

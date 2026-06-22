@@ -1173,6 +1173,7 @@ class ViolationClassifier:
         tracker_states: Optional[Dict] = None,
         phone_detections: Optional[List[Detection]] = None,
         signal_bbox: Optional[List[float]] = None,
+        enable_motion_violations: bool = True,
     ) -> List[ViolationResult]:
         """
         Run all applicable violation checks for all vehicles in a frame.
@@ -1188,6 +1189,17 @@ class ViolationClassifier:
                           light, in signal_frame coordinates. When omitted,
                           MLSignalStateDetector falls back to scanning the
                           generic top-40%-of-frame guess.
+        enable_motion_violations : Wrong-side driving, stop-line, red-light,
+                          and illegal-parking are all inherently motion/
+                          duration-based — they describe what a vehicle DID
+                          over time, which a single still image cannot show.
+                          Set False for single-image and non-sequential-batch
+                          callers so these four checks (including their
+                          single-frame "static" fallbacks) are skipped
+                          entirely rather than guessed from one frame. True
+                          for real video (or a batch confirmed to be
+                          consecutive video frames), where genuine motion
+                          history exists.
 
         Returns
         -------
@@ -1253,49 +1265,55 @@ class ViolationClassifier:
                     if v:
                         results.append(v)
 
-            # --- Track-based violations ---
-            if tid is not None and tracker_states and tid in tracker_states:
-                state = tracker_states[tid]
-                history_bboxes = state.bboxes_in_window(20)
-                vx, vy = state.velocity()
-                is_stat = state.is_stationary()
+            # --- Track-based violations — wrong-side/stop-line/red-light/
+            # illegal-parking are all about what a vehicle did over time, so
+            # they're skipped entirely (no tracked check AND no single-frame
+            # "static" guess) when the caller has confirmed there's no real
+            # motion history behind this frame (a single image, or a batch
+            # of unrelated photos).
+            if enable_motion_violations:
+                if tid is not None and tracker_states and tid in tracker_states:
+                    state = tracker_states[tid]
+                    history_bboxes = state.bboxes_in_window(20)
+                    vx, vy = state.velocity()
+                    is_stat = state.is_stationary()
 
-                v = self.check_red_light(
-                    history_bboxes, signal_state, signal_conf, vehicle.bbox, light_detected
-                )
-                if v:
-                    results.append(v)
+                    v = self.check_red_light(
+                        history_bboxes, signal_state, signal_conf, vehicle.bbox, light_detected
+                    )
+                    if v:
+                        results.append(v)
 
-                v = self.check_stop_line(history_bboxes, signal_state, vehicle.bbox, light_detected)
-                if v:
-                    results.append(v)
+                    v = self.check_stop_line(history_bboxes, signal_state, vehicle.bbox, light_detected)
+                    if v:
+                        results.append(v)
 
-                v = self.check_wrong_side((vx, vy), vehicle.bbox)
-                if v:
-                    results.append(v)
+                    v = self.check_wrong_side((vx, vy), vehicle.bbox)
+                    if v:
+                        results.append(v)
 
-                in_zone = self.is_in_no_parking_zone(vehicle.bbox)
-                v = self.check_illegal_parking(vehicle, tid, is_stat, in_zone)
-                if v:
-                    results.append(v)
+                    in_zone = self.is_in_no_parking_zone(vehicle.bbox)
+                    v = self.check_illegal_parking(vehicle, tid, is_stat, in_zone)
+                    if v:
+                        results.append(v)
 
-            else:
-                # --- Image-only (no tracker) fallbacks for PS compliance ---
-                v = self._check_red_light_static(vehicle.bbox, signal_state, signal_conf, light_detected)
-                if v:
-                    results.append(v)
+                else:
+                    # --- Image-only (no tracker) fallbacks for PS compliance ---
+                    v = self._check_red_light_static(vehicle.bbox, signal_state, signal_conf, light_detected)
+                    if v:
+                        results.append(v)
 
-                v = self._check_stop_line_static(vehicle.bbox, signal_state, light_detected)
-                if v:
-                    results.append(v)
+                    v = self._check_stop_line_static(vehicle.bbox, signal_state, light_detected)
+                    if v:
+                        results.append(v)
 
-                v = self._check_wrong_side_static(vehicle.bbox)
-                if v:
-                    results.append(v)
+                    v = self._check_wrong_side_static(vehicle.bbox)
+                    if v:
+                        results.append(v)
 
-                v = self._check_illegal_parking_static(vehicle.bbox)
-                if v:
-                    results.append(v)
+                    v = self._check_illegal_parking_static(vehicle.bbox)
+                    if v:
+                        results.append(v)
 
         # Global confidence gate: a flagged violation only counts as a real
         # violation above 40% confidence. Below that, it's too uncertain to

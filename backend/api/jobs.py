@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -48,9 +49,25 @@ from ..services.calibration_service import CalibrationService
 from ..services.challan_service import ChallanService
 
 
+ml_available = False
+ml_preprocessor = None
+ml_detector = None
+ml_ocr = None
+ml_classifier = None
+ml_driver_state = None
+
 def _ensure_ml() -> bool:
     """Return True when the shared ML registry loaded all components."""
-    return get_ml_registry().available
+    global ml_available, ml_preprocessor, ml_detector, ml_ocr, ml_classifier, ml_driver_state
+    ml = get_ml_registry()
+    ml_available = ml.available
+    if ml_available:
+        ml_preprocessor = ml.preprocessor
+        ml_detector = ml.detector
+        ml_ocr = ml.ocr
+        ml_classifier = ml.classifier
+        ml_driver_state = ml.driver_state
+    return ml_available
 
 
 async def _resolve_calibration(camera_id: Optional[str]) -> dict:
@@ -155,6 +172,7 @@ def _draw_annotated_evidence(
     plate_conf: float,
     location_label: str,
     vid: str,
+    plate_crop: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     The official "Annotated Evidence" image — final violations only, no
@@ -203,6 +221,17 @@ def _draw_annotated_evidence(
             label_y1 = max(0, y1 - 30)
             cv2.rectangle(annotated, (x1, label_y1), (x1 + lw, y1), color, -1)
             cv2.putText(annotated, label, (x1 + 4, max(16, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 255, 255), 1)
+
+        # Draw license plate crop zoom-in
+        if plate_crop is not None:
+            v0 = violations[0]
+            bbox0 = v0.get("bbox") or []
+            if len(bbox0) == 4:
+                vx1, vy1, vx2, vy2 = map(int, bbox0)
+                from ..services.ml_registry import get_ml_registry
+                ml = get_ml_registry()
+                if ml.visualizer is not None:
+                    annotated = ml.visualizer.draw_plate_crop(annotated, plate_crop, (vx1, vy1 - 70))
     else:
         cv2.putText(annotated, "COMPLIANT — No Violation Detected", (12, 72),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 200, 80), 2)
@@ -269,6 +298,7 @@ def _classify_and_package(
     persons: list,
     tracker_states: Optional[dict] = None,
     calibrated: bool = False,
+    enable_motion_violations: bool = True,
 ) -> List[dict]:
     """
     Driver state, OCR, violation classification, and evidence packaging for
@@ -279,9 +309,14 @@ def _classify_and_package(
     separate records/images — splitting one frame into many was the bug.
 
     tracker_states (from a VehicleTracker) enables the velocity/duration-aware
-    track-based checks for stop-line/red-light/wrong-side/illegal-parking;
-    pass None for single-image jobs with no track history, which falls back
-    to the single-frame static checks.
+    track-based checks for stop-line/red-light/wrong-side/illegal-parking.
+
+    enable_motion_violations gates those same four checks entirely — wrong-
+    side driving, stop-line, red-light, and illegal-parking all describe
+    what a vehicle did over time, which a single still image cannot show.
+    False for single-image jobs and non-sequential batches (skips both the
+    tracked check AND its single-frame "static" fallback); True for real
+    video frames or a batch confirmed to be consecutive video frames.
     """
     # Driver state — drowsiness/yawn via MediaPipe FaceLandmarker on the whole
     # frame. A single still image rarely accumulates enough consecutive
@@ -301,6 +336,7 @@ def _classify_and_package(
             ocr_result = ml_ocr.read_plate_from_vehicle(veh_crop)
             veh.plate_text = ocr_result.formatted_text or "UNCLEAR"
             veh.plate_conf = ocr_result.confidence
+            p_crop = ml_ocr.detect_plate_region(veh_crop, [0, 0, veh_crop.shape[1], veh_crop.shape[0]])
             all_plates.append({
                 "plate_text": ocr_result.formatted_text or "UNCLEAR",
                 "confidence": round(ocr_result.confidence, 3),
@@ -309,6 +345,7 @@ def _classify_and_package(
                 "ocr_engine": ocr_result.ocr_engine,
                 "state": ocr_result.state_name,
                 "is_valid": ocr_result.is_valid,
+                "plate_crop": p_crop,
             })
 
     # Violation classification — runs once for the whole image (pass full
@@ -321,6 +358,7 @@ def _classify_and_package(
         signal_frame=processed,
         phone_detections=phone_detections,
         tracker_states=tracker_states,
+        enable_motion_violations=enable_motion_violations,
     )
 
     driver_state_dict = {
@@ -351,7 +389,9 @@ def _classify_and_package(
     elif all_plates:
         best_plate = max(all_plates, key=lambda p: p["confidence"])
     else:
-        best_plate = {"plate_text": "UNCLEAR", "confidence": 0.0, "vehicle_class": "unknown", "is_valid": False, "state": "Unknown"}
+        best_plate = {"plate_text": "UNCLEAR", "confidence": 0.0, "vehicle_class": "unknown", "is_valid": False, "state": "Unknown", "plate_crop": None}
+
+    best_plate_crop = best_plate.get("plate_crop")
 
     # Per-violation routing: a violation only needs a human look when it's
     # below TIER1_AUTO_CHALLAN confidence. Clear, high-confidence violations
@@ -392,7 +432,7 @@ def _classify_and_package(
 
     annotated_img = _draw_annotated_evidence(
         img, violation_dicts, best_plate["plate_text"], best_plate["confidence"],
-        source_name, vid,
+        source_name, vid, best_plate_crop,
     )
     annotated_path = f"evidence/annotated/{job_id}/{vid}.jpg"
     cv2.imwrite(annotated_path, annotated_img)
@@ -470,9 +510,7 @@ def _run_ml_on_image(
         # Preprocess (optimized with brightness-based bypass and downscaling)
         processed = ml_preprocessor.preprocess(img, is_video=is_video)
 
-        # Detect vehicles + persons + phones — no tracking for a single image,
-        # so stop-line/red-light/wrong-side/illegal-parking fall back to the
-        # single-frame static checks inside ml_classifier.check_all().
+        # Detect vehicles + persons + phones — no tracking for a single image.
         detections = ml_detector.detect(processed)
         vehicles = ml_detector.get_vehicles(detections)
         persons = ml_detector.get_persons(detections)
@@ -483,11 +521,16 @@ def _run_ml_on_image(
             job_id, source_name, len(vehicles), len(persons), len(phones)
         )
 
+        # Wrong-side/stop-line/red-light/illegal-parking are motion/duration
+        # violations — a single still image can't show what a vehicle did
+        # over time, so these are skipped entirely (not even the single-frame
+        # static guess) rather than inferred from one frame.
         return _classify_and_package(
             img, processed, job_id, source_name, t_start,
             detections, vehicles, persons,
             tracker_states=None,
             calibrated=calibration["calibrated"],
+            enable_motion_violations=False,
         )
     except Exception as e:
         logger.error("ML inference error in job %s: %s", job_id, e, exc_info=True)
@@ -495,7 +538,50 @@ def _run_ml_on_image(
 
 
 # ---------------------------------------------------------------------------
-# Real ML inference on a batch of independent image files
+# Batch frame-sequence detection
+# ---------------------------------------------------------------------------
+
+_FRAME_NUM_RE = re.compile(r"^(.*?)(\d+)(\D*)$")
+
+
+def _looks_like_video_frame_sequence(filenames: List[str]) -> bool:
+    """
+    Heuristic: does this batch look like frames extracted from one video
+    (e.g. "frame_0001.jpg", "frame_0002.jpg", ...) rather than a set of
+    unrelated photos? If every filename shares the same non-numeric
+    prefix/suffix template and the embedded numbers are mostly consecutive
+    once sorted, treat it as a real video-frame sequence — motion/duration
+    violations (wrong-side, stop-line, red-light, illegal-parking) only make
+    sense when there's genuine continuity between frames, which unrelated
+    photos (different cameras/scenes/times) don't have.
+    """
+    if len(filenames) < 3:
+        return False
+
+    template = None
+    nums: List[int] = []
+    for fn in filenames:
+        base = os.path.splitext(os.path.basename(fn))[0]
+        m = _FRAME_NUM_RE.match(base)
+        if not m:
+            return False
+        prefix, num, suffix = m.groups()
+        if template is None:
+            template = (prefix, suffix)
+        elif (prefix, suffix) != template:
+            return False
+        nums.append(int(num))
+
+    nums.sort()
+    diffs = [b - a for a, b in zip(nums, nums[1:])]
+    if not diffs:
+        return False
+    consecutive_ratio = sum(1 for d in diffs if d == 1) / len(diffs)
+    return consecutive_ratio >= 0.7
+
+
+# ---------------------------------------------------------------------------
+# Real ML inference on a batch of image files
 # ---------------------------------------------------------------------------
 
 def _run_ml_on_batch(
@@ -504,11 +590,17 @@ def _run_ml_on_batch(
     calibration: Optional[dict] = None,
 ) -> List[dict]:
     """
-    Run the full ML pipeline independently on each uploaded image, clubbing
-    every result under one job_id/evidence folder. Unlike video frames,
-    batch images are unrelated photos — no tracking across them — and every
-    image's result is kept (no all-compliant collapsing), since each was a
-    distinct, deliberate upload rather than a redundant sampled frame.
+    Run the full ML pipeline on every uploaded image, clubbing every result
+    under one job_id/evidence folder.
+
+    Most batches are unrelated photos, so by default there's no tracking
+    across them and motion/duration violations (wrong-side, stop-line,
+    red-light, illegal-parking) are skipped entirely — a single still image
+    can't show what a vehicle did over time. But if the filenames look like
+    a sequence of frames extracted from one video (see
+    _looks_like_video_frame_sequence), this instead runs the same
+    persistent-tracker path as a real video upload, in filename order, and
+    enables those checks — because in that case real motion history exists.
     """
     if not _ensure_ml() or not ml_available:
         logger.warning("ML pipeline not available — skipping batch job %s", job_id)
@@ -517,8 +609,22 @@ def _run_ml_on_batch(
     calibration = calibration or _DEFAULT_CALIBRATION
     _apply_calibration(calibration)
 
+    filenames = [filename for _, filename in files]
+    is_sequence = _looks_like_video_frame_sequence(filenames)
+    if is_sequence:
+        logger.info("Job %s: batch of %d images detected as a video-frame sequence — enabling tracked checks", job_id, len(files))
+        ordered_files = sorted(files, key=lambda f: int(_FRAME_NUM_RE.match(os.path.splitext(os.path.basename(f[1]))[0]).group(2)))
+    else:
+        ordered_files = files
+
+    tracker = None
+    first_sampled = True
+    if is_sequence:
+        from ml.pipeline.tracker import VehicleTracker
+        tracker = VehicleTracker(stop_line_y=calibration["stop_line_y"])
+
     all_results: List[dict] = []
-    for file_bytes, filename in files:
+    for frame_idx, (file_bytes, filename) in enumerate(ordered_files):
         nparr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if img is None:
@@ -527,8 +633,17 @@ def _run_ml_on_batch(
 
         t_start = time.perf_counter()
         try:
-            processed = ml_preprocessor.preprocess(img, is_video=False)
-            detections = ml_detector.detect(processed)
+            processed = ml_preprocessor.preprocess(img, is_video=is_sequence)
+
+            tracker_states = None
+            if is_sequence:
+                detections = ml_detector.detect_with_tracking(processed, persist=not first_sampled)
+                first_sampled = False
+                tracker.update(detections, frame_idx)
+                tracker_states = {s.track_id: s for s in tracker.active_tracks()}
+            else:
+                detections = ml_detector.detect(processed)
+
             vehicles = ml_detector.get_vehicles(detections)
             persons = ml_detector.get_persons(detections)
             phones = ml_detector.get_phones(detections)
@@ -542,8 +657,9 @@ def _run_ml_on_batch(
             all_results.extend(_classify_and_package(
                 img, processed, job_id, source_name, t_start,
                 detections, vehicles, persons,
-                tracker_states=None,
+                tracker_states=tracker_states,
                 calibrated=calibration["calibrated"],
+                enable_motion_violations=is_sequence,
             ))
         except Exception as e:
             logger.error("ML inference error in batch job %s (file %s): %s", job_id, filename, e, exc_info=True)
@@ -633,6 +749,7 @@ def _run_ml_on_video(
                     detections, vehicles, persons,
                     tracker_states=tracker_states,
                     calibrated=calibration["calibrated"],
+                    enable_motion_violations=True,  # real video — all violations checked
                 )
                 for r in frame_results:
                     (passed_results if r["status"] == "passed" else violation_results).append(r)

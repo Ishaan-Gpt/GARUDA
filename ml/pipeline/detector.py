@@ -178,7 +178,11 @@ class VehicleDetector:
         try:
             from ultralytics import YOLO  # type: ignore
 
-            if model_path and Path(model_path).exists():
+            if model_path:
+                # Either a local file or an ultralytics shorthand name
+                # ("yolov8n.pt") — ultralytics auto-downloads/caches the
+                # latter, so this also covers requesting a lighter model
+                # that isn't already on disk (e.g. the live-analysis path).
                 self._model = YOLO(model_path)
                 self._model_name = Path(model_path).stem
                 logger.info("Loaded model: %s", model_path)
@@ -186,6 +190,7 @@ class VehicleDetector:
                 # Use local copy in weights dir; ultralytics auto-downloads if missing
                 local = Path(__file__).parent.parent / "models" / "weights" / "detection" / "yolov8m.pt"
                 self._model = YOLO(str(local) if local.exists() else "yolov8m.pt")
+                self._model_name = "yolov8m"
                 logger.info("Loaded yolov8m from %s", local if local.exists() else "ultralytics cache")
 
         except ImportError as exc:
@@ -201,6 +206,7 @@ class VehicleDetector:
         self,
         image: np.ndarray,
         classes: Optional[List[int]] = None,
+        imgsz: Optional[int] = None,
     ) -> List[Detection]:
         """
         Single-frame detection (no tracking).
@@ -209,6 +215,11 @@ class VehicleDetector:
         ----------
         image   : BGR numpy array
         classes : COCO class IDs to keep; None = all traffic classes
+        imgsz   : Inference resolution YOLO resizes to internally; None uses
+                  the model's default (640). Lowering this (e.g. 384) cuts
+                  CPU inference time roughly quadratically — used by the
+                  live-analysis path where per-frame latency matters more
+                  than the extra few % mAP a full 640px pass buys.
 
         Returns
         -------
@@ -216,7 +227,7 @@ class VehicleDetector:
         """
         filter_cls = classes if classes is not None else list(ALL_TRAFFIC_CLASS_IDS)
 
-        results = self._model.predict(
+        predict_kwargs = dict(
             source=image,
             conf=self.conf,
             iou=self.iou,
@@ -225,6 +236,9 @@ class VehicleDetector:
             verbose=False,
             stream=False,
         )
+        if imgsz:
+            predict_kwargs["imgsz"] = imgsz
+        results = self._model.predict(**predict_kwargs)
 
         detections: List[Detection] = []
         for result in results:
@@ -248,6 +262,7 @@ class VehicleDetector:
         image: np.ndarray,
         persist: bool = True,
         tracker: str = "bytetrack.yaml",
+        imgsz: Optional[int] = None,
     ) -> List[Detection]:
         """
         Detection + ByteTrack tracking. Returns persistent track_ids.
@@ -257,8 +272,9 @@ class VehicleDetector:
         image   : BGR numpy array
         persist : Keep track state between consecutive calls (use True for video)
         tracker : Tracker config name ("bytetrack.yaml" or "botsort.yaml")
+        imgsz   : See ``detect()`` — lower this for faster CPU-only live inference.
         """
-        results = self._model.track(
+        track_kwargs = dict(
             source=image,
             persist=persist,
             tracker=tracker,
@@ -268,6 +284,9 @@ class VehicleDetector:
             device=self.device,
             verbose=False,
         )
+        if imgsz:
+            track_kwargs["imgsz"] = imgsz
+        results = self._model.track(**track_kwargs)
 
         detections: List[Detection] = []
         for result in results:

@@ -224,6 +224,47 @@ class FrameVisualizer:
         cv2.putText(frame, text, (x, y), FONT, FONT_MED, color, 2)
         return frame
 
+    def draw_plate_crop(
+        self,
+        frame: np.ndarray,
+        plate_crop: np.ndarray,
+        position: Optional[Tuple[int, int]] = None,
+    ) -> np.ndarray:
+        """Overlay the high-contrast license plate crop onto the frame with a clean white card border"""
+        if plate_crop is None or plate_crop.size == 0:
+            return frame
+
+        try:
+            # Standard width of 140px, height dynamically adjusted
+            target_w = 140
+            h_c, w_c = plate_crop.shape[:2]
+            aspect = w_c / h_c if h_c > 0 else 3.5
+            target_h = int(target_w / aspect)
+            if target_h < 15:
+                target_h = 40
+
+            resized = cv2.resize(plate_crop, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+
+            # Add a white border around it (3px)
+            bordered = cv2.copyMakeBorder(resized, 3, 3, 3, 3, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+
+            bh, bw = bordered.shape[:2]
+            fh, fw = frame.shape[:2]
+
+            # Default position is top-left, just under the header (say y=60)
+            x, y = position or (10, 60)
+
+            # Clamp boundaries
+            ox = max(10, min(x, fw - bw - 10))
+            oy = max(10, min(y, fh - bh - 10))
+
+            frame[oy:oy+bh, ox:ox+bw] = bordered
+        except Exception as e:
+            # Silence error if drawing fails
+            pass
+
+        return frame
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
