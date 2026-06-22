@@ -52,13 +52,13 @@ PLATE_PATTERNS: List[re.Pattern] = [
 
 # Common OCR character substitutions for license plates
 OCR_CORRECTIONS: Dict[str, str] = {
-    "O": "0",   # Letter O → digit 0 (in numeric positions)
-    "I": "1",   # Letter I → digit 1 (in numeric positions)
-    "l": "1",   # Lowercase l → 1
-    "B": "8",   # B → 8 (context-dependent, handled carefully)
-    "S": "5",   # S → 5
-    "Z": "2",   # Z → 2
-    "G": "6",
+    "O": "0", "o": "0",   # Letter O/o → digit 0
+    "I": "1", "i": "1",   # Letter I/i → digit 1
+    "l": "1", "L": "1",   # Letter l/L → digit 1
+    "B": "8", "b": "8",   # Letter B/b → digit 8
+    "S": "5", "s": "5",   # Letter S/s → digit 5
+    "Z": "2", "z": "2",   # Letter Z/z → digit 2
+    "G": "6", "g": "6",   # Letter G/g → digit 6
 }
 
 
@@ -261,36 +261,40 @@ class PlateOCR:
         if plate_image is None or plate_image.size == 0:
             return PlateResult()
 
-        # For EasyOCR: run on raw colour image — neural net works best without pre-binarisation
         raw_text = ""
         confidence = 0.0
 
         if self._ocr is not None:
             if self._engine_name == "fast_plate_ocr":
-                # fast-plate-ocr works best on raw colour crop; try enhanced as fallback
+                # Try raw color crop first (modern OCR works best without binarization)
                 raw_text, confidence = self._fast_plate_ocr_read(plate_image)
-                if not raw_text or confidence < 0.25:
+                if not raw_text or confidence < 0.35:
                     enhanced = self._enhance_for_ocr(plate_image)
                     raw_text2, confidence2 = self._fast_plate_ocr_read(enhanced)
                     if confidence2 > confidence:
                         raw_text, confidence = raw_text2, confidence2
             elif self._engine_name == "easyocr":
-                # EasyOCR: read raw colour image
+                # Try raw color crop first
                 raw_text, confidence = self._easyocr_ocr(plate_image)
-                if not raw_text or confidence < 0.25:
+                if not raw_text or confidence < 0.35:
                     enhanced = self._enhance_for_ocr(plate_image)
                     raw_text2, confidence2 = self._easyocr_ocr(enhanced)
                     if confidence2 > confidence:
                         raw_text, confidence = raw_text2, confidence2
             else:
-                enhanced = self._enhance_for_ocr(plate_image)
-                raw_text, confidence = self._extract_text(enhanced)
-                if not raw_text or confidence < 0.3:
-                    raw_text2, confidence2 = self._extract_text(cv2.bitwise_not(enhanced))
+                # PaddleOCR/Tesseract: try raw color first
+                raw_text, confidence = self._extract_text(plate_image)
+                if not raw_text or confidence < 0.35:
+                    enhanced = self._enhance_for_ocr(plate_image)
+                    raw_text2, confidence2 = self._extract_text(enhanced)
                     if confidence2 > confidence:
                         raw_text, confidence = raw_text2, confidence2
+                    if not raw_text or confidence < 0.35:
+                        raw_text3, confidence3 = self._extract_text(cv2.bitwise_not(enhanced))
+                        if confidence3 > confidence:
+                            raw_text, confidence = raw_text3, confidence3
 
-        # No fake/mock plate generation — return real OCR result or empty
+        # Parse text using robust Indian plate rules (sliding window state search)
         formatted, is_valid = self._parse_plate(raw_text)
         state_code = formatted[:2] if len(formatted) >= 2 else ""
         state_name = STATE_CODES.get(state_code, "Unknown")
@@ -405,59 +409,88 @@ class PlateOCR:
         Locate license plate within vehicle bounding box.
 
         Uses the trained YOLO plate detector when available (much more
-        reliable than contours), falling back to contour detection +
-        aspect-ratio filtering otherwise.
-
-        Plate typical aspect ratio: 4:1 to 7:1 (width:height)
-        Plate location: lower 35% of vehicle bbox
+        reliable than contours), falling back to contour-based morphological
+        extraction otherwise.
         """
         if self._plate_detector is not None:
             crop = self._detect_plate_region_yolo(image, vehicle_bbox)
             if crop is not None:
                 return crop
-            # fall through to heuristic if YOLO found nothing in this crop
 
+        # Fallback to morphological plate extraction pipeline
+        return self.detect_plate_region_morphological(image, vehicle_bbox)
+
+    def detect_plate_region_morphological(
+        self,
+        image: np.ndarray,
+        vehicle_bbox: List[float],
+    ) -> Optional[np.ndarray]:
+        """
+        Locate license plate using standard morphological image processing routines
+        (Grayscale -> Gaussian Blur -> Otsu Threshold -> Canny Edge -> Dilation Loop -> Contour Filtering).
+        As detailed in the SOD real-time plate isolation routines.
+        """
         x1, y1, x2, y2 = map(int, vehicle_bbox)
         vh = y2 - y1
 
-        # Focus on lower portion of vehicle where plate sits
-        plate_roi_y1 = y1 + int(vh * 0.55)
-        roi = image[plate_roi_y1:y2, x1:x2]
+        # Search a wider region because drone/aerial angles can place plates anywhere
+        # Take lower 75% of the vehicle crop
+        plate_roi_y1 = y1 + int(vh * 0.25)
+        roi = image[max(0, plate_roi_y1):y2, max(0, x1):x2]
 
         if roi.size == 0:
             return None
 
-        # Morphological approach for rectangular plate detection
+        # 1. Grayscale Colorspace conversion
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+        # 2. Noise reduction via Gaussian Blur
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blur, 30, 200)
 
-        # Dilate to connect nearby edges
+        # 3. Image thresholding (Otsu's binarization to obtain binary image)
+        _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # 4. Canny edge detection
+        edges = cv2.Canny(thresh, 30, 200)
+
+        # 5. Dilation loop (dilate 10 times to merge characters & plate boundaries)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        dilated = cv2.dilate(edges, kernel, iterations=2)
+        dilated = cv2.dilate(edges, kernel, iterations=10)
 
+        # 6. Connected component labeling (find contours)
         contours, _ = cv2.findContours(
             dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
-        plate_candidates: List[Tuple[int, int, int, int]] = []
+        plate_candidates = []
+        roi_h, roi_w = roi.shape[:2]
+        roi_area = roi_w * roi_h
+
+        # 7. Discard regions of non-interest using shape & ratio filters
         for cnt in contours:
             rx, ry, rw, rh = cv2.boundingRect(cnt)
-            if rh < 5:
+            if rh < 8 or rw < 15:
                 continue
             aspect = rw / rh
             area = rw * rh
-            # Standard Indian plate: ~330mm × 110mm → aspect ≈ 3
-            if 2.5 <= aspect <= 8.0 and area > 400:
-                plate_candidates.append((rx, ry, rw, rh))
+            
+            # Standard Indian plate ratio is roughly 3.0 to 4.5
+            # We filter for aspect ratio between 2.0 and 6.5, and reasonable size relative to vehicle
+            if 2.0 <= aspect <= 6.5 and (0.005 * roi_area <= area <= 0.20 * roi_area):
+                score = abs(aspect - 3.5) # Prefer aspect ratios closer to 3.5
+                plate_candidates.append((score, (rx, ry, rw, rh)))
 
         if plate_candidates:
-            # Best: largest area candidate
-            rx, ry, rw, rh = max(plate_candidates, key=lambda r: r[2] * r[3])
-            return roi[ry : ry + rh, rx : rx + rw]
+            # Pick best candidate closest to ideal plate aspect ratio
+            plate_candidates.sort(key=lambda x: x[0])
+            rx, ry, rw, rh = plate_candidates[0][1]
+            
+            # Crop with small padding (2px)
+            pad = 2
+            return roi[max(0, ry - pad):min(roi_h, ry + rh + pad), max(0, rx - pad):min(roi_w, rx + rw + pad)].copy()
 
-        # Fallback: return bottom strip of vehicle (simple heuristic)
-        return roi[int(roi.shape[0] * 0.3) :, :]
+        # Fallback: return bottom strip of the vehicle
+        return roi[int(roi_h * 0.4) :, :].copy()
 
     def _detect_plate_region_yolo(
         self,
@@ -532,10 +565,10 @@ class PlateOCR:
         if not candidates:
             return None
 
-        # Return the highest-confidence crop, enhanced for OCR
+        # Return the highest-confidence raw color crop (do NOT enhance it here)
         candidates.sort(key=lambda t: t[0], reverse=True)
         best_crop = candidates[0][1]
-        return self._enhance_for_ocr(best_crop)
+        return best_crop
 
     # ------------------------------------------------------------------
     # Internal: text extraction per engine
@@ -661,11 +694,57 @@ class PlateOCR:
         if not raw:
             return "", False
 
-        # Clean: keep only alphanumeric + spaces/hyphens
-        cleaned = re.sub(r"[^A-Z0-9\s\-]", "", raw.upper().strip())
-        cleaned = re.sub(r"[\s\-]+", " ", cleaned).strip()
+        # Clean: keep only alphanumeric characters
+        cleaned = re.sub(r"[^A-Z0-9]", "", raw.upper().strip())
 
-        # Try regex patterns
+        # Sliding window search for 2-letter state codes
+        matched_state = None
+        state_idx = -1
+        for state in STATE_CODES.keys():
+            idx = cleaned.find(state)
+            if idx != -1:
+                # Prioritize state codes that appear earlier in the text
+                if state_idx == -1 or idx < state_idx:
+                    state_idx = idx
+                    matched_state = state
+
+        # If a state code is found, align and parse from there
+        if matched_state is not None and state_idx != -1:
+            plate_candidate = cleaned[state_idx:]
+            if len(plate_candidate) >= 6:
+                # Extract first 10 alphanumeric characters (max Indian plate length)
+                plate_candidate = plate_candidate[:10]
+                chars = list(plate_candidate)
+                n = len(chars)
+                
+                # Correction rules:
+                # District code (chars at index 2, 3) must be digits (e.g. MH12...)
+                for i in range(2, min(4, n)):
+                    if chars[i] in OCR_CORRECTIONS:
+                        chars[i] = OCR_CORRECTIONS[chars[i]]
+                        
+                # End serial number (last 4 chars) must be digits (e.g. ...1234)
+                for i in range(max(4, n - 4), n):
+                    if chars[i] in OCR_CORRECTIONS:
+                        chars[i] = OCR_CORRECTIONS[chars[i]]
+                        
+                corrected_plate = "".join(chars)
+                
+                # Check standard regex patterns on the corrected candidate
+                for pattern in PLATE_PATTERNS:
+                    match = pattern.search(corrected_plate)
+                    if match:
+                        plate_raw = match.group()
+                        formatted = self._format_plate(plate_raw)
+                        if formatted:
+                            return formatted, True
+                            
+                # Best-effort formatting if we have a state code alignment
+                formatted = self._format_plate(corrected_plate)
+                if formatted:
+                    return formatted, True
+
+        # Fallback to regex check on the entire cleaned string
         for pattern in PLATE_PATTERNS:
             match = pattern.search(cleaned)
             if match:
@@ -675,10 +754,9 @@ class PlateOCR:
                 if formatted:
                     return formatted, True
 
-        # Best-effort: return cleaned text even if not standard
-        no_spaces = re.sub(r"[\s\-]", "", cleaned)
-        if 6 <= len(no_spaces) <= 12:
-            return no_spaces, False
+        # Best-effort: return cleaned text if of acceptable length
+        if 6 <= len(cleaned) <= 12:
+            return cleaned, False
 
         return "", False
 

@@ -82,30 +82,63 @@ def main():
             if track_id is not None and track_id in cached_plates:
                 cached = cached_plates[track_id]
                 
+            vx1, vy1, vx2, vy2 = map(int, vehicle.bbox)
+            bbox_area = (vx2 - vx1) * (vy2 - vy1)
+            
+            # Decide if we need to run OCR:
+            # We only run plate detection and OCR if:
+            # 1. We have no cached data for this vehicle track yet.
+            # 2. Or, the vehicle has moved significantly closer (bounding box area grew by 15% or more).
+            # If the vehicle has NOT moved closer, we reuse the cached result (even if it's empty/failed)
+            # because the resolution/distance is the same, so retrying would just waste CPU.
+            need_ocr = True
             if cached is not None:
+                moved_closer = bbox_area > cached["bbox_area"] * 1.15
+                if not moved_closer:
+                    need_ocr = False
+
+            if not need_ocr and cached is not None:
                 plate_crop = cached["plate_crop"]
                 formatted_text = cached["text"]
             else:
-                vx1, vy1, vx2, vy2 = map(int, vehicle.bbox)
                 # Crop vehicle area
                 crop = frame[max(0, vy1):min(height, vy2), max(0, vx1):min(width, vx2)]
                 plate_crop = None
                 formatted_text = ""
+                confidence = 0.0
                 
                 if crop.size > 0:
-                    # Detect license plate region using 2-stage YOLO (Koushi-YasirFaiz)
+                    # Detect license plate region (uses YOLO or Morphological fallback)
                     plate_crop = ocr.detect_plate_region(crop, [0, 0, crop.shape[1], crop.shape[0]])
                     if plate_crop is not None and plate_crop.size > 0:
                         # Perform OCR to read plate text
                         ocr_result = ocr.read_plate_from_vehicle(crop)
                         formatted_text = ocr_result.formatted_text or ""
+                        confidence = ocr_result.confidence
                     
-                    # Store in tracking cache
+                    # Update or store in tracking cache
                     if track_id is not None:
-                        cached_plates[track_id] = {
-                            "plate_crop": plate_crop,
-                            "text": formatted_text
-                        }
+                        if (cached is None or 
+                            confidence > cached["confidence"] or 
+                            (formatted_text != "" and cached["text"] == "") or
+                            bbox_area > cached["bbox_area"] * 1.15):
+                            
+                            # Keep whichever plate crop is not None
+                            final_crop = plate_crop if plate_crop is not None else (cached["plate_crop"] if cached else None)
+                            final_text = formatted_text if formatted_text != "" else (cached["text"] if cached else "")
+                            final_conf = max(confidence, cached["confidence"]) if cached else confidence
+                            
+                            cached_plates[track_id] = {
+                                "plate_crop": final_crop,
+                                "text": final_text,
+                                "confidence": final_conf,
+                                "bbox_area": bbox_area
+                            }
+                            
+                # Use current or cached fallback if OCR failed this frame but succeeded before
+                if (plate_crop is None or formatted_text == "") and cached is not None:
+                    plate_crop = plate_crop if plate_crop is not None else cached["plate_crop"]
+                    formatted_text = formatted_text if formatted_text != "" else cached["text"]
 
             if plate_crop is not None and plate_crop.size > 0:
                 vx1, vy1, vx2, vy2 = map(int, vehicle.bbox)
