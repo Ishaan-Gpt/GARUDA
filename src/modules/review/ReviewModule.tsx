@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { usePlatform, Violation } from "@/context/PlatformContext";
 import { CloseIcon, DownloadIcon } from "@/components/Icons";
 import { STATUS_LABELS, STATUS_BADGE_CLASS, SEVERITY_COLOR } from "@/lib/violations";
+import { getApiBase, getMediaBase } from "@/lib/evidence";
 
 interface ReviewLogEntry {
   id: number;
@@ -27,7 +28,7 @@ export default function ReviewModule() {
   const [reviewHistory, setReviewHistory] = useState<ReviewLogEntry[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
 
-  const mediaBase = typeof window !== "undefined" ? `http://${window.location.hostname}:8000` : "";
+  const mediaBase = getMediaBase();
 
   const filteredViolations = useMemo(() => {
     const seenIds = new Set<string>();
@@ -84,8 +85,7 @@ export default function ReviewModule() {
   // Real review/audit history for this violation
   useEffect(() => {
     if (!selectedId) return;
-    const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
-    fetch(`http://${host}:8000/api/v1/reviews`)
+    fetch(`${getApiBase()}/reviews`)
       .then(res => res.ok ? res.json() : [])
       .then((data: ReviewLogEntry[]) => setReviewHistory(data.filter(r => r.target === selectedId)))
       .catch(() => setReviewHistory([]));

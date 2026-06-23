@@ -96,9 +96,22 @@ export interface JobResult {
 // ---------------------------------------------------------------------------
 
 export function getApiBase(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    const url = process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, "");
+    return url.endsWith("/api/v1") ? url : `${url}/api/v1`;
+  }
   if (typeof window === "undefined") return "http://localhost:8000/api/v1";
   const protocol = window.location.protocol === "https:" ? "https" : "http";
   return `${protocol}://${window.location.hostname}:8000/api/v1`;
+}
+
+export function getMediaBase(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, "");
+  }
+  if (typeof window === "undefined") return "http://localhost:8000";
+  const protocol = window.location.protocol === "https:" ? "https" : "http";
+  return `${protocol}://${window.location.hostname}:8000`;
 }
 
 function authHeaders(token?: string | null): HeadersInit {

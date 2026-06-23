@@ -158,7 +158,13 @@ const PlatformContext = createContext<PlatformContextType | undefined>(undefined
 let API_BASE = "http://localhost:8000/api/v1";
 let WS_BASE = "ws://localhost:8000";
 
-if (typeof window !== "undefined") {
+if (process.env.NEXT_PUBLIC_API_URL) {
+  const url = process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, "");
+  API_BASE = url.endsWith("/api/v1") ? url : `${url}/api/v1`;
+  WS_BASE = url.startsWith("https://")
+    ? url.replace("https://", "wss://")
+    : url.replace("http://", "ws://");
+} else if (typeof window !== "undefined") {
   const protocol = window.location.protocol === "https:" ? "https" : "http";
   const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
   API_BASE = `${protocol}://${window.location.hostname}:8000/api/v1`;

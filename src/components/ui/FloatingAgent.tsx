@@ -4,6 +4,7 @@ import React, { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { usePlatform } from "@/context/PlatformContext";
 import Markdown from "./Markdown";
+import { getApiBase } from "@/lib/evidence";
 
 interface Message {
   role: "user" | "assistant";
@@ -38,9 +39,7 @@ export default function FloatingAgent() {
     setLoading(true);
 
     try {
-      const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
-      const protocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "https" : "http";
-      const res = await fetch(`${protocol}://${host}:8000/api/v1/agent/chat`, {
+      const res = await fetch(`${getApiBase()}/agent/chat`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
