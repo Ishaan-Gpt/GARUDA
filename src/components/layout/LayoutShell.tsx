@@ -99,19 +99,15 @@ export default function LayoutShell({ children }: LayoutShellProps) {
       <aside className={`app-sidebar ${mobileMenuOpen ? "mobile-open" : ""}`}>
         <div style={{ padding: "16px", borderBottom: "1px solid var(--border-color)", background: "#FCFCFC" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <div style={{ 
-              width: "28px", 
-              height: "28px", 
-              borderRadius: "6px", 
-              backgroundColor: "var(--border-accent-dark)", 
-              display: "flex", 
-              alignItems: "center", 
-              justifyContent: "center",
-              fontWeight: "bold",
-              color: "var(--text-accent)"
-            }}>
-              G
-            </div>
+            <img 
+              src="/logo.png" 
+              alt="Garuda Logo" 
+              style={{
+                width: "28px",
+                height: "28px",
+                objectFit: "contain"
+              }} 
+            />
             <div>
               <div style={{ fontSize: "14px", fontWeight: "700", letterSpacing: "0.5px" }}>GARUDA</div>
               <div style={{ fontSize: "9px", color: "var(--text-muted)", textTransform: "uppercase" }}>Violation Intel</div>

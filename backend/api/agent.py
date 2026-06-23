@@ -11,12 +11,14 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 import httpx
 
+from ..core.config import get_settings
 from ..core.database import UserModel
 from ..core.agent_executor import execute_agent_loop
 from .auth import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/agent")
+settings = get_settings()
 
 
 class ChatMessageInput(BaseModel):
@@ -55,7 +57,7 @@ async def check_agent_status():
     """Verify Ollama service and gemma3:1b availability."""
     try:
         async with httpx.AsyncClient() as client:
-            res = await client.get("http://localhost:11434/api/tags", timeout=3.0)
+            res = await client.get(f"{settings.OLLAMA_URL.rstrip('/')}/api/tags", timeout=3.0)
             if res.status_code == 200:
                 models = res.json().get("models", [])
                 gemma_available = any("gemma3:1b" in m.get("name", "") for m in models)

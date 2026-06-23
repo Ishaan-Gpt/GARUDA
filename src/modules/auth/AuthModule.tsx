@@ -73,21 +73,16 @@ export default function AuthModule() {
         <div style={{ padding: "28px" }}>
           {/* Logo Title */}
           <div style={{ textAlign: "center", marginBottom: "24px" }}>
-            <div style={{
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              width: "36px",
-              height: "36px",
-              borderRadius: "8px",
-              backgroundColor: "var(--border-accent-dark)",
-              fontWeight: "bold",
-              color: "var(--text-accent)",
-              fontSize: "18px",
-              marginBottom: "8px"
-            }}>
-              G
-            </div>
+            <img 
+              src="/logo.png" 
+              alt="Garuda Logo" 
+              style={{
+                width: "48px",
+                height: "48px",
+                objectFit: "contain",
+                marginBottom: "8px"
+              }} 
+            />
             <h2 style={{ fontSize: "18px", fontWeight: "700", letterSpacing: "-0.5px", margin: 0 }}>
               {isLogin ? "GARUDA CONTROL PORTAL" : "CREATE ENFORCEMENT ACCOUNT"}
             </h2>

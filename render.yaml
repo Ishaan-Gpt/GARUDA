@@ -30,6 +30,8 @@ services:
         sync: false
       - key: DEVICE
         value: "cpu"
+      - key: OLLAMA_URL
+        value: "http://localhost:11434"
 
   - type: web
     name: garuda-frontend

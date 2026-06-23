@@ -19,9 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import AsyncSessionLocal, CameraModel, VehicleModel, ViolationModel, UserModel, AuditLogModel, update_violation_status
 
-logger = logging.getLogger(__name__)
+from .config import get_settings
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
+OLLAMA_URL = f"{settings.OLLAMA_URL.rstrip('/')}/api/chat"
 MODEL_NAME = "gemma3:1b"
 
 
@@ -313,8 +316,8 @@ async def execute_agent_loop(user_message: str, chat_history: List[Dict[str, str
         logger.error("Ollama connection error: %s", e)
         return {
             "text": (
-                "⚠️ **Local AI Connection Failure**\n\n"
-                "Unable to establish connectivity to the local Ollama instance on `http://localhost:11434`. "
+                "⚠️ **Ollama AI Connection Failure**\n\n"
+                f"Unable to establish connectivity to the Ollama instance on `{settings.OLLAMA_URL}`. "
                 "Ensure Ollama is running and the `gemma3:1b` model is active using:\n"
                 "```bash\n"
                 "ollama run gemma3:1b\n"

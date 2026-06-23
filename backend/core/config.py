@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Postgres for prod: postgresql+asyncpg://user:pass@localhost/garuda
     DATABASE_URL: str = "sqlite+aiosqlite:///./garuda.db"
 
+    # Ollama endpoint
+    OLLAMA_URL: str = "http://localhost:11434"
+
     # Redis (for vehicle track state — optional)
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_ENABLED: bool = False
