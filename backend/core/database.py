@@ -52,11 +52,17 @@ def normalize_violation_type(raw_type: str) -> str:
 # Engine + session factory
 # ---------------------------------------------------------------------------
 
+db_url = settings.DATABASE_URL
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+elif db_url.startswith("postgresql://"):
+    db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
 engine = create_async_engine(
-    settings.DATABASE_URL,
+    db_url,
     echo=settings.DEBUG,
     connect_args={"check_same_thread": False}
-    if "sqlite" in settings.DATABASE_URL
+    if "sqlite" in db_url
     else {},
 )
 
@@ -194,7 +200,7 @@ async def _add_missing_columns(conn, table: str, new_columns: Dict[str, str]) ->
     Postgres deployment gets new columns straight from create_all() since
     the table won't exist yet there.
     """
-    if "sqlite" not in settings.DATABASE_URL:
+    if "sqlite" not in db_url:
         return
     result = await conn.execute(text(f"PRAGMA table_info({table})"))
     existing = {row[1] for row in result.fetchall()}
@@ -217,7 +223,7 @@ async def init_db() -> None:
             "camera_id":      "VARCHAR",
             "result_summary": "TEXT DEFAULT '{}'",
         })
-    logger.info("Database initialised: %s", settings.DATABASE_URL)
+    logger.info("Database initialised: %s", db_url)
 
     # Seed default users
     from .auth_utils import hash_password
