@@ -1,0 +1,44 @@
+databases:
+  - name: garuda-db
+    databaseName: garuda
+    user: garuda_user
+    plan: free
+
+services:
+  - type: web
+    name: garuda-backend
+    env: python
+    plan: starter # Starter plan ($7/mo, 512MB-1GB+) is highly recommended because YOLOv8 + EasyOCR model inference requires memory
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: garuda-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ALERTS_ENABLED
+        value: "true"
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
+        sync: false
+      - key: OFFICER_PHONES
+        sync: false
+      - key: DEVICE
+        value: "cpu"
+
+  - type: web
+    name: garuda-frontend
+    env: node
+    plan: free
+    buildCommand: npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        fromRoute:
+          type: web
+          name: garuda-backend
