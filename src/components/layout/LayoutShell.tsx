@@ -15,8 +15,10 @@ import {
   SettingsIcon, 
   BellIcon,
   CloseIcon,
-  CheckIcon
+  CheckIcon,
+  BotIcon
 } from "@/components/Icons";
+import FloatingAgent from "@/components/ui/FloatingAgent";
  
 interface LayoutShellProps {
   children: React.ReactNode;
@@ -51,6 +53,7 @@ export default function LayoutShell({ children }: LayoutShellProps) {
     { name: "Violations", href: "/violations", icon: <AlertIcon size={16} /> },
     { name: "Human Check", href: "/review", icon: <ShieldIcon size={16} /> },
     { name: "Upload Evidence", href: "/evidence", icon: <UploadIcon size={16} /> },
+    { name: "AI Assistant", href: "/agent", icon: <BotIcon size={16} /> },
     { name: "Analytics", href: "/analytics", icon: <ChartIcon size={16} /> },
     { name: "Settings", href: "/settings", icon: <SettingsIcon size={16} /> },
   ];
@@ -252,6 +255,9 @@ export default function LayoutShell({ children }: LayoutShellProps) {
         <main className="content-wrapper">
           {children}
         </main>
+
+        {/* Gemma Floating Copilot Chatbot */}
+        {!isPublicRoute && <FloatingAgent />}
       </div>
 
       {/* Notification Sliding Drawer overlay */}
