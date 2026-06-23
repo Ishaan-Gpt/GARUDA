@@ -53,7 +53,7 @@ export default function AuthModule() {
       justifyContent: "center",
       minHeight: "100vh",
       padding: "20px",
-      backgroundImage: "linear-gradient(rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0.45)), url('/login.png')",
+      backgroundImage: "url('/login.png')",
       backgroundSize: "cover",
       backgroundPosition: "center",
       backgroundRepeat: "no-repeat"
