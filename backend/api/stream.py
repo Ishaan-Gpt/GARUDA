@@ -410,6 +410,7 @@ def _render_frame_full(
     track_seq: Dict[int, int],
     next_seq: List[int],
     reported: Dict[int, Set[str]],
+    cached_plates: Dict[int, dict],
 ) -> dict:
     """
     One frame of a video-render session, using the SAME full pipeline as the
@@ -459,13 +460,93 @@ def _render_frame_full(
     for v in violations:
         by_bbox[tuple(map(int, v.bbox))].append(v)
 
+    # 1. Pre-process license plate detection and OCR for all vehicles in this frame (using cache)
+    vehicle_plates = {}
+    for det in detections:
+        if not det.is_vehicle or det.track_id is None:
+            continue
+            
+        track_id = det.track_id
+        x1, y1, x2, y2 = map(int, det.bbox)
+        vehicle_width = x2 - x1
+        bbox_area = vehicle_width * (y2 - y1)
+        
+        # Scale gate: skip if too small
+        if vehicle_width < 110:
+            continue
+            
+        cached = cached_plates.get(track_id)
+        
+        need_ocr = True
+        if cached is not None:
+            moved_closer = bbox_area > cached["bbox_area"] * 1.15
+            if not moved_closer:
+                need_ocr = False
+                
+        if not need_ocr and cached is not None:
+            plate_crop = cached["plate_crop"]
+            formatted_text = cached["text"]
+            confidence = cached["confidence"]
+            is_valid = cached["is_valid"]
+            state_name = cached["state"]
+        else:
+            # Crop vehicle area
+            ph, pw = frame.shape[:2]
+            crop = frame[max(0, y1):min(ph, y2), max(0, x1):min(pw, x2)]
+            plate_crop = None
+            formatted_text = ""
+            confidence = 0.0
+            is_valid = False
+            state_name = "Unknown"
+            
+            if crop.size > 0:
+                plate_crop = ml.ocr.detect_plate_region(crop, [0, 0, crop.shape[1], crop.shape[0]])
+                if plate_crop is not None and plate_crop.size > 0:
+                    ocr_res = ml.ocr.read_plate_from_vehicle(crop)
+                    formatted_text = ocr_res.formatted_text or ""
+                    confidence = ocr_res.confidence
+                    is_valid = ocr_res.is_valid
+                    state_name = ocr_res.state_name
+                    
+                # Update cache
+                if (cached is None or 
+                    confidence > cached["confidence"] or 
+                    (formatted_text != "" and cached["text"] == "") or 
+                    bbox_area > cached["bbox_area"] * 1.15):
+                    
+                    final_crop = plate_crop if plate_crop is not None else (cached["plate_crop"] if cached else None)
+                    final_text = formatted_text if formatted_text != "" else (cached["text"] if cached else "")
+                    final_conf = max(confidence, cached["confidence"]) if cached else confidence
+                    final_valid = is_valid if formatted_text != "" else (cached["is_valid"] if cached else False)
+                    final_state = state_name if formatted_text != "" else (cached["state"] if cached else "Unknown")
+                    
+                    cached_plates[track_id] = {
+                        "plate_crop": final_crop,
+                        "text": final_text,
+                        "confidence": final_conf,
+                        "is_valid": final_valid,
+                        "state": final_state,
+                        "bbox_area": bbox_area
+                    }
+                    
+        # Apply confidence/length gate to filter noise
+        should_overlay_plate = False
+        if plate_crop is not None and plate_crop.size > 0:
+            if is_valid:
+                should_overlay_plate = True
+            elif len(formatted_text.replace("-", "")) >= 4 and confidence >= 0.25:
+                should_overlay_plate = True
+                
+        if should_overlay_plate:
+            vehicle_plates[track_id] = {
+                "plate_crop": plate_crop,
+                "text": formatted_text,
+                "confidence": confidence,
+                "is_valid": is_valid,
+                "state": state_name
+            }
+
     annotated = processed.copy()
-    # Plain debug view — every tracked detection in one neutral color with
-    # its ID/class/confidence, no violation tinting. Mirrors the image
-    # pipeline's annotated-vs-demo split (jobs.py _draw_annotated_evidence
-    # vs _draw_demo_visualization): "annotated" is the clean evidence view,
-    # "demo" is the QA view showing everything the model saw regardless of
-    # whether it became a citation.
     demo = processed.copy()
     new_violations: List[dict] = []
 
@@ -482,22 +563,43 @@ def _render_frame_full(
             for v in vlist
         ]
 
+        # Get cached/detected plate info
+        plate_info = vehicle_plates.get(det.track_id) if det.track_id is not None else None
+
+        # ── Draw Demo Frame (All Detections) ──────────────────────────────────
+        if vtype_names:
+            for i, vt in enumerate(vtype_names):
+                color = VIOLATION_COLORS_BGR.get(vt, (0, 0, 255))
+                pad = i * 4
+                cv2.rectangle(demo, (x1 - pad, y1 - pad), (x2 + pad, y2 + pad), color, 2)
+            label = f"#{seq} " + " + ".join(vtype_names)
+            label_color = VIOLATION_COLORS_BGR.get(vtype_names[0], (0, 0, 255))
+        else:
+            cv2.rectangle(demo, (x1, y1), (x2, y2), DEFAULT_BOX_COLOR_BGR, 2)
+            label = f"#{seq} {det.class_name}"
+            label_color = DEFAULT_BOX_COLOR_BGR
+            
+        if plate_info:
+            label += f" [{plate_info['text']}]"
+            
+        _draw_id_label(demo, label, x1, y1, label_color)
+
+        if plate_info and ml.visualizer is not None:
+            demo = ml.visualizer.draw_plate_crop(demo, plate_info["plate_crop"], (x1, y1 - 70))
+
+        # ── Draw Annotated Frame (Only Violations) ────────────────────────────
         if vtype_names:
             for i, vt in enumerate(vtype_names):
                 color = VIOLATION_COLORS_BGR.get(vt, (0, 0, 255))
                 pad = i * 4
                 cv2.rectangle(annotated, (x1 - pad, y1 - pad), (x2 + pad, y2 + pad), color, 2)
-            label = f"#{seq} " + " + ".join(vtype_names)
-            label_color = VIOLATION_COLORS_BGR.get(vtype_names[0], (0, 0, 255))
-        else:
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), DEFAULT_BOX_COLOR_BGR, 2)
-            label = f"#{seq} {det.class_name}"
-            label_color = DEFAULT_BOX_COLOR_BGR
-        _draw_id_label(annotated, label, x1, y1, label_color)
+            ann_label = f"#{seq} " + " + ".join(vtype_names)
+            if plate_info:
+                ann_label += f" [{plate_info['text']}]"
+            _draw_id_label(annotated, ann_label, x1, y1, label_color)
 
-        demo_color = (255, 255, 0)  # cyan — neutral, same regardless of violation status
-        cv2.rectangle(demo, (x1, y1), (x2, y2), demo_color, 1)
-        _draw_id_label(demo, f"#{seq} {det.class_name} {det.confidence*100:.0f}%", x1, y1, demo_color)
+            if plate_info and ml.visualizer is not None:
+                annotated = ml.visualizer.draw_plate_crop(annotated, plate_info["plate_crop"], (x1, y1 - 70))
 
         # Dedup: only the violation types not already cited for this track_id.
         if det.track_id is not None and vlist:
@@ -530,10 +632,18 @@ def _render_frame_full(
                 ]
                 already.update(fresh_names)
 
-    cv2.putText(demo, f"DETECTIONS: {len(detections)}  VEHICLES: {len(vehicles)}  PERSONS: {len(persons)}",
-                (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    if ml.visualizer is not None:
+        # Draw stats info on demo view
+        cv2.putText(demo, f"DETECTIONS: {len(detections)}  VEHICLES: {len(vehicles)}  PERSONS: {len(persons)}",
+                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # Draw calibrated stop line on both views if configured
+        if hasattr(ml.classifier, "stop_line_y") and ml.classifier.stop_line_y:
+            ml.visualizer.draw_stop_line(demo, ml.classifier.stop_line_y)
+            ml.visualizer.draw_stop_line(annotated, ml.classifier.stop_line_y)
 
     return {"frame": annotated, "demo_frame": demo, "new_violations": new_violations}
+
 
 
 @router.websocket("/ws/video-render")
@@ -643,6 +753,7 @@ async def ws_video_render(websocket: WebSocket):
         track_seq: Dict[int, int] = {}
         next_seq = [1]
         reported: Dict[int, Set[str]] = defaultdict(set)
+        cached_plates: Dict[int, dict] = {}
         violation_summaries: List[dict] = []
 
         loop = asyncio.get_event_loop()
@@ -662,7 +773,7 @@ async def ws_video_render(websocket: WebSocket):
             if frame_idx % sample_interval == 0:
                 result = await loop.run_in_executor(
                     None, _render_frame_full, ml, frame, tracker, frame_idx, not first_sampled,
-                    track_seq, next_seq, reported,
+                    track_seq, next_seq, reported, cached_plates,
                 )
                 first_sampled = False
                 processed_count += 1

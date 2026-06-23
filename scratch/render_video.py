@@ -2,26 +2,29 @@ import os
 import sys
 import time
 from pathlib import Path
+from collections import defaultdict
 import cv2
-import numpy as np
 
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from ml.pipeline.detector import VehicleDetector
-from ml.pipeline.ocr import PlateOCR
-from ml.utils.visualizer import FrameVisualizer
+from backend.services.ml_registry import get_ml_registry
+from backend.api.stream import _render_frame_full, _reencode_to_browser_h264
+from ml.pipeline.tracker import VehicleTracker
 
 def main():
     input_video = "test/videos/License Plate Detection Test - Dev Drone Bhowmik (720p, h264).mp4"
     output_dir = "evidence/video"
     os.makedirs(output_dir, exist_ok=True)
-    output_video = os.path.join(output_dir, "rendered_output.mp4")
+    
+    output_video_demo = os.path.join(output_dir, "rendered_output_demo.mp4")
+    output_video_annotated = os.path.join(output_dir, "rendered_output_annotated.mp4")
 
-    print("Initializing GARUDA ML Pipeline (Koushi-YasirFaiz Plate OCR)...")
-    detector = VehicleDetector(device="cpu")
-    ocr = PlateOCR()
-    visualizer = FrameVisualizer()
+    print("Initializing GARUDA ML Pipeline (detector, OCR, classifier, visualizer)...")
+    ml = get_ml_registry()
+    if not ml.available:
+        print(f"[FATAL] ML pipeline failed to load: {ml.error}")
+        sys.exit(1)
 
     cap = cv2.VideoCapture(input_video)
     if not cap.isOpened():
@@ -30,7 +33,7 @@ def main():
 
     width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps    = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    fps    = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     print(f"Processing Video: {input_video}")
@@ -43,14 +46,25 @@ def main():
 
     # Using mp4v codec for standard mp4 compatibility on Windows
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_video, fourcc, output_fps, (width, height))
+    out_demo = cv2.VideoWriter(output_video_demo, fourcc, output_fps, (width, height))
+    out_annotated = cv2.VideoWriter(output_video_annotated, fourcc, output_fps, (width, height))
+
+    # One tracker.update() per sampled output frame
+    STOP_LINE_Y = 400  # Default stop line for this video
+    tracker = VehicleTracker(stop_line_y=STOP_LINE_Y)
+    ml.classifier.stop_line_y = STOP_LINE_Y
+    ml.classifier.fps = output_fps
+    ml.classifier.reset_signal_smoothing()
 
     frame_idx = 0
     processed_count = 0
+    first_sampled = True
     start_time = time.time()
 
-    # Track-based license plate crop & OCR caching to avoid redundant heavy model evaluations
-    cached_plates = {} # track_id -> { "plate_crop": np.ndarray, "text": str }
+    track_seq = {}
+    next_seq = [1]
+    reported = defaultdict(set)
+    cached_plates = {}
 
     while True:
         ret, frame = cap.read()
@@ -65,121 +79,14 @@ def main():
 
         processed_count += 1
         
-        # Preprocess / Inference with lower resolution imgsz=384 and tracking enabled
-        detections = detector.detect_with_tracking(frame, persist=True, imgsz=384)
-        vehicles = detector.get_vehicles(detections)
-
-        # Draw default green bounding boxes
-        annotated = frame.copy()
-        annotated = visualizer.draw_detections(annotated, [d.to_dict() for d in detections], show_conf=False)
-
-        # Process each vehicle for plate detection and crop overlays
-        for vehicle in vehicles:
-            track_id = vehicle.track_id
-            
-            vx1, vy1, vx2, vy2 = map(int, vehicle.bbox)
-            vehicle_width = vx2 - vx1
-            bbox_area = vehicle_width * (vy2 - vy1)
-            
-            # GATING 1: Scale gate. If the vehicle is too far away (width < 110px),
-            # the plate is physically unreadable, so skip to avoid false-positive bumper/grill crops.
-            if vehicle_width < 110:
-                continue
-            
-            # Check tracking cache first to see if we've already done plate detection and OCR on this vehicle
-            cached = None
-            if track_id is not None and track_id in cached_plates:
-                cached = cached_plates[track_id]
-                
-            # Decide if we need to run OCR:
-            # We only run plate detection and OCR if:
-            # 1. We have no cached data for this vehicle track yet.
-            # 2. Or, the vehicle has moved significantly closer (bounding box area grew by 15% or more).
-            # If the vehicle has NOT moved closer, we reuse the cached result (even if it's empty/failed)
-            # because the resolution/distance is the same, so retrying would just waste CPU.
-            need_ocr = True
-            if cached is not None:
-                moved_closer = bbox_area > cached["bbox_area"] * 1.15
-                if not moved_closer:
-                    need_ocr = False
-
-            if not need_ocr and cached is not None:
-                plate_crop = cached["plate_crop"]
-                formatted_text = cached["text"]
-                confidence = cached["confidence"]
-            else:
-                # Crop vehicle area
-                crop = frame[max(0, vy1):min(height, vy2), max(0, vx1):min(width, vx2)]
-                plate_crop = None
-                formatted_text = ""
-                confidence = 0.0
-                
-                if crop.size > 0:
-                    # Detect license plate region (uses YOLO or Morphological fallback)
-                    plate_crop = ocr.detect_plate_region(crop, [0, 0, crop.shape[1], crop.shape[0]])
-                    if plate_crop is not None and plate_crop.size > 0:
-                        # Perform OCR to read plate text
-                        ocr_result = ocr.read_plate_from_vehicle(crop)
-                        formatted_text = ocr_result.formatted_text or ""
-                        confidence = ocr_result.confidence
-                    
-                    # Update or store in tracking cache
-                    if track_id is not None:
-                        if (cached is None or 
-                            confidence > cached["confidence"] or 
-                            (formatted_text != "" and cached["text"] == "") or
-                            bbox_area > cached["bbox_area"] * 1.15):
-                            
-                            # Keep whichever plate crop is not None
-                            final_crop = plate_crop if plate_crop is not None else (cached["plate_crop"] if cached else None)
-                            final_text = formatted_text if formatted_text != "" else (cached["text"] if cached else "")
-                            final_conf = max(confidence, cached["confidence"]) if cached else confidence
-                            
-                            cached_plates[track_id] = {
-                                "plate_crop": final_crop,
-                                "text": final_text,
-                                "confidence": final_conf,
-                                "bbox_area": bbox_area
-                            }
-                            
-                # Use current or cached fallback if OCR failed this frame but succeeded before
-                if (plate_crop is None or formatted_text == "") and cached is not None:
-                    plate_crop = plate_crop if plate_crop is not None else cached["plate_crop"]
-                    formatted_text = formatted_text if formatted_text != "" else cached["text"]
-                    confidence = cached["confidence"]
-
-            # GATING 2: Confidence and text-length overlay filter.
-            # Only draw the crop zoom-in card if we have a valid plate format OR a highly probable OCR read
-            # (length >= 4 and confidence >= 0.25). This cleans up all bumper/grill false-positives.
-            is_valid_plate = False
-            if formatted_text != "":
-                _, is_valid_plate = ocr._parse_plate(formatted_text)
-                
-            should_overlay = False
-            if plate_crop is not None and plate_crop.size > 0:
-                if is_valid_plate:
-                    should_overlay = True
-                elif len(formatted_text.replace("-", "")) >= 4 and confidence >= 0.25:
-                    should_overlay = True
-
-            if should_overlay:
-                # Draw white bordered plate crop overlay just above the vehicle
-                annotated = visualizer.draw_plate_crop(annotated, plate_crop, (vx1, vy1 - 65))
-                
-                # If readable, write the plate text above the vehicle bounding box
-                if formatted_text:
-                    cv2.putText(
-                        annotated,
-                        formatted_text,
-                        (vx1, vy1 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        (0, 255, 0),
-                        2,
-                    )
-
-        # Write frame to output video
-        out.write(annotated)
+        result = _render_frame_full(
+            ml, frame, tracker, frame_idx, not first_sampled,
+            track_seq, next_seq, reported, cached_plates
+        )
+        first_sampled = False
+        
+        out_annotated.write(result["frame"])
+        out_demo.write(result["demo_frame"])
 
         # Print progress
         if processed_count % 10 == 0 or frame_idx == total_frames:
@@ -189,39 +96,18 @@ def main():
             print(f"Processed Frame {frame_idx}/{total_frames} | Sampled {processed_count} | Elapsed: {elapsed:.1f}s | ETA: {eta:.1f}s", flush=True)
 
     cap.release()
-    out.release()
-    print(f"\n[SUCCESS] Rendered video saved to: {output_video}", flush=True)
+    out_demo.release()
+    out_annotated.release()
+    print(f"\n[SUCCESS] Rendered videos saved locally.", flush=True)
 
-    # Post-process: convert the raw OpenCV output (mp4v codec) to web/WhatsApp compatible H.264 format
-    try:
-        import subprocess
-        import imageio_ffmpeg
-        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-        temp_output = output_video.replace(".mp4", "_temp_h264.mp4")
-        print("\nConverting video to universally compatible H.264 format (for WhatsApp/Web)...")
-        cmd = [
-            ffmpeg_exe,
-            "-y",
-            "-i", output_video,
-            "-vcodec", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-profile:v", "high",
-            "-level", "4.0",
-            "-an",  # No audio stream
-            temp_output
-        ]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if result.returncode == 0:
-            import os
-            os.replace(temp_output, output_video)
-            print(f"[SUCCESS] Web-optimized H.264 video saved to: {output_video}", flush=True)
-        else:
-            print(f"[WARNING] FFmpeg conversion failed: {result.stderr.decode()}", flush=True)
-            if os.path.exists(temp_output):
-                os.remove(temp_output)
-    except Exception as e:
-        print(f"[WARNING] Could not convert video to H.264: {e}", flush=True)
+    # Post-process: convert both videos to web/WhatsApp compatible H.264 format
+    print("\nConverting demo video to universally compatible H.264 format (for WhatsApp/Web)...")
+    ok1 = _reencode_to_browser_h264(output_video_demo)
+    print("  Demo video H.264 re-encode OK" if ok1 else "  [WARNING] Demo video H.264 re-encode failed")
+
+    print("\nConverting annotated video to universally compatible H.264 format (for WhatsApp/Web)...")
+    ok2 = _reencode_to_browser_h264(output_video_annotated)
+    print("  Annotated video H.264 re-encode OK" if ok2 else "  [WARNING] Annotated video H.264 re-encode failed")
 
 if __name__ == '__main__':
     main()
-

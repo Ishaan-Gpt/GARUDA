@@ -52,7 +52,11 @@ def main() -> None:
     # tail than feed garbage frames into the detector.
     trim_tail_frames = int(sys.argv[3]) if len(sys.argv) > 3 else 0
     output_fps_override = float(sys.argv[4]) if len(sys.argv) > 4 else RENDER_OUTPUT_FPS
-    output_video = os.path.join(OUTPUT_DIR, output_name)
+    
+    # Separate outputs for demo vs annotated
+    base_out_name = os.path.splitext(output_name)[0]
+    output_video_annotated = os.path.join(OUTPUT_DIR, f"{base_out_name}_annotated.mp4")
+    output_video_demo = os.path.join(OUTPUT_DIR, f"{base_out_name}_demo.mp4")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -85,9 +89,7 @@ def main() -> None:
 
     tracker = VehicleTracker(stop_line_y=STOP_LINE_Y)
     ml.classifier.stop_line_y = STOP_LINE_Y
-    # One tracker.update() per sampled output frame -> the rate the
-    # crossing/velocity windows in check_red_light/check_stop_line and the
-    # frame-anchored illegal-parking timer need to be scaled to.
+    # One tracker.update() per sampled output frame
     ml.classifier.fps = output_fps
     ml.classifier.reset_signal_smoothing()
 
@@ -97,13 +99,14 @@ def main() -> None:
             setattr(ml.classifier, k, v)
         print(f"  Applied calibration override: {override}")
 
-    writer = cv2.VideoWriter(
-        output_video, cv2.VideoWriter_fourcc(*"mp4v"), output_fps, (width, height)
-    )
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer_annotated = cv2.VideoWriter(output_video_annotated, fourcc, output_fps, (width, height))
+    writer_demo = cv2.VideoWriter(output_video_demo, fourcc, output_fps, (width, height))
 
     track_seq: dict = {}
     next_seq = [1]
     reported: dict = defaultdict(set)
+    cached_plates: dict = {}
     all_violations: list = []
 
     frame_idx = 0
@@ -121,10 +124,11 @@ def main() -> None:
         if frame_idx % sample_interval == 0:
             result = _render_frame_full(
                 ml, frame, tracker, frame_idx, not first_sampled,
-                track_seq, next_seq, reported,
+                track_seq, next_seq, reported, cached_plates
             )
             first_sampled = False
-            writer.write(result["frame"])
+            writer_annotated.write(result["frame"])
+            writer_demo.write(result["demo_frame"])
             processed_count += 1
 
             for nv in result["new_violations"]:
@@ -143,14 +147,20 @@ def main() -> None:
         frame_idx += 1
 
     cap.release()
-    writer.release()
+    writer_annotated.release()
+    writer_demo.release()
     elapsed = time.time() - t_start
     print(f"\nProcessed {processed_count} sampled frames in {elapsed:.1f}s")
-    print(f"Raw render written to: {output_video}")
+    print(f"Raw annotated render written to: {output_video_annotated}")
+    print(f"Raw demo render written to: {output_video_demo}")
 
-    print("Re-encoding to browser/WhatsApp-compatible H.264...")
-    ok = _reencode_to_browser_h264(output_video)
-    print("  H.264 re-encode OK" if ok else "  [WARNING] H.264 re-encode failed, mp4v file kept as-is")
+    print("Re-encoding annotated video to browser/WhatsApp-compatible H.264...")
+    ok1 = _reencode_to_browser_h264(output_video_annotated)
+    print("  Annotated H.264 re-encode OK" if ok1 else "  [WARNING] Annotated H.264 re-encode failed, raw file kept")
+
+    print("Re-encoding demo video to browser/WhatsApp-compatible H.264...")
+    ok2 = _reencode_to_browser_h264(output_video_demo)
+    print("  Demo H.264 re-encode OK" if ok2 else "  [WARNING] Demo H.264 re-encode failed, raw file kept")
 
     print(f"\n=== SUMMARY ===")
     print(f"Total violations found: {len(all_violations)}")
@@ -163,7 +173,8 @@ def main() -> None:
     if not all_violations:
         print("  (none — vehicle(s) detected but no violation conditions met)")
 
-    print(f"\nResult video: {os.path.abspath(output_video)}")
+    print(f"\nAnnotated result video: {os.path.abspath(output_video_annotated)}")
+    print(f"Demo result video:      {os.path.abspath(output_video_demo)}")
 
 
 if __name__ == "__main__":
