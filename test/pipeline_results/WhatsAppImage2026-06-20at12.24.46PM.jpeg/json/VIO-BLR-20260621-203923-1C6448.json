@@ -1,0 +1,58 @@
+{
+  "violation_id": "VIO-BLR-20260621-203923-1C6448",
+  "system_version": "GARUDA-v1.0",
+  "schema_version": "1.0",
+  "timestamp": "2026-06-21T15:09:23.576155Z",
+  "camera": {
+    "id": "BLR-CAM-DEMO-001",
+    "location": "MG Road & Brigade Road Intersection",
+    "coordinates": {
+      "lat": 12.9753,
+      "lon": 77.6069
+    }
+  },
+  "vehicle": {
+    "class": "unknown",
+    "color": "unknown",
+    "track_id": null,
+    "license_plate": "G50226",
+    "plate_raw": "G50226",
+    "plate_confidence": 0.3548,
+    "plate_valid": false,
+    "plate_state": "Unknown",
+    "repeat_offender": false,
+    "prior_violations": 0
+  },
+  "violations": [
+    {
+      "type": "helmet_non_compliance",
+      "confidence": 0.1728,
+      "severity": "high",
+      "fine_amount_inr": 1000,
+      "bbox": [
+        590.82,
+        470.96,
+        649.7,
+        550.72
+      ],
+      "metadata": {
+        "helmet_score": 0.173,
+        "method": "aicity_9cls"
+      }
+    }
+  ],
+  "driver_state": {
+    "alerts": [],
+    "total_alerts": 0
+  },
+  "evidence": {
+    "annotated_image": "test\\pipeline_results\\WhatsAppImage2026-06-20at12.24.46PM.jpeg\\annotated\\VIO-BLR-20260621-203923-1C6448.jpg",
+    "raw_frame": "test\\pipeline_results\\WhatsAppImage2026-06-20at12.24.46PM.jpeg\\raw\\VIO-BLR-20260621-203923-1C6448_raw.jpg"
+  },
+  "processing": {
+    "inference_device": "CPU",
+    "inference_time_ms": 3095.8,
+    "model": "yolov8m",
+    "ocr_engine": "fast_plate_ocr"
+  }
+}
