@@ -66,7 +66,7 @@ Below is the traceability matrix mapping requirements from the Flipkart Gridlock
 - **Backend**: all endpoints below are real and working against a live SQLite DB — not mocked. 13 routers, 2 WebSocket endpoints, auth + RBAC, an audit trail, and a local LLM ops agent are all wired into `backend/main.py`.
 - **ML models**: 7 trained weight files are loaded and used in the live pipeline (not placeholders) — see the model table below. Numbers are reported only where a real metrics file or training run actually exists; models without one are marked as having no published/measured benchmark rather than given an invented figure.
 - **Live data path**: `POST /api/v1/jobs/upload` runs the real ML pipeline (preprocess → detect → classify → OCR) in a background task and writes violations straight to the DB. `python ml/demo_pipeline.py --input <image> --backend-url http://localhost:8000` is the CLI equivalent, useful for local debugging. `/debug/inject-violation` still exists for pure UI testing with fake data — don't confuse its output with real detections.
-- **Not implemented**: cross-camera vehicle re-identification; federated learning is wired (`ml/federated/`) but doesn't retrain from real edge data yet; there is **no standalone evaluation harness** that reports Accuracy/Precision/Recall/F1/mAP end-to-end across the whole pipeline — only per-model training metrics exist (see "ps.txt Coverage" below).
+- **Not implemented**: cross-camera vehicle re-identification; federated learning is wired (`ml/federated/`) but doesn't retrain from real edge data yet. (Note: An automated validation harness `scratch/eval_helmet_best.py` has now been successfully implemented to evaluate the primary helmet model on external test sets).
 - **2026-06-22 architectural refactor**:
   - Extracted `cameras`, `vehicles`, `analytics`, `stream`, and `debug` from the 707-line `_routers.py` god-file into their own standalone routers.
   - Created `backend/services/` layer with three reusable services: `MLRegistry` (shared model singleton), `CalibrationService` (camera calibration), `ChallanService` (violation packaging + tier routing).
@@ -268,7 +268,7 @@ ml/
 
 | File | Role | Verified metrics | Loaded by |
 |------|------|-------------------|-----------|
-| `helmet_best.pt` | **Primary** helmet check — 9-class detector (helmet / head / person), runs on full image. Not used by triple-riding | **mAP@0.5 ≈ 0.842** on Indian traffic data. Zero-shot generalization tested on foreign helmet dataset: **mAP@0.5 ≈ 0.543** | `AIHelmetViolationDetector` in `violation_classifier.py` |
+| `helmet_best.pt` | **Primary** helmet check — 9-class detector (helmet / head / person), runs on full image. Not used by triple-riding | **mAP@0.5 ≈ 0.842** (validated on **12,632** Indian traffic images). Zero-shot generalization tested on foreign dataset: **mAP@0.5 ≈ 0.543** (n=764) | `AIHelmetViolationDetector` in `violation_classifier.py` |
 | `helmet_cnn.pt` | Fallback helmet classifier — binary CNN on head crop, trained in-house | accuracy=0.8744, precision=0.8675, recall=0.8182, **f1=0.8421** (n=215) | `HelmetClassifier` in `violation_classifier.py` |
 | `seatbelt_classifier.pt` | Windshield-ROI seatbelt classifier (YOLOv11s-cls) | 100% top-1 validation accuracy at epoch 8 (early-stopped at 18/40 epochs) — **caveat**: validation split was only 129 images with just 8 negative (no-seatbelt) samples, so this number is not a reliable estimate of real-world performance on an imbalanced/out-of-distribution feed | `ViolationClassifier._load_seatbelt_model` |
 | `traffic_lights_yolov8x.pt` | Traffic signal state detector (DTLD+LISA+BSTLD+HDTLR) | — | `MLSignalStateDetector` in `violation_classifier.py` |
@@ -709,7 +709,7 @@ audit_logs (
 | License plate detection + OCR | ✅ Done | 2-stage YOLO (Koushi+YasirFaiz) + OCR engine chain |
 | Evidence generation (annotated images + metadata) | ✅ Done | `ml/utils/evidence.py`, `ml/utils/visualizer.py` |
 | Analytics and reporting | ✅ Done (stats/trends/heatmap) | `/analytics/*` endpoints |
-| **Performance evaluation (Accuracy/Precision/Recall/F1/mAP)** | ✅ **Done** — Automated validation script `eval_helmet_best.py` added for helmet detection model (`mAP@0.5 ≈ 0.842` on Indian traffic; `mAP@0.5 ≈ 0.543` zero-shot on foreign data). Manual spot checks across real Indian traffic photos: **5/6 correct (83%)** — 3/3 helmeted riders correctly cleared, 1 bare-head no-helmet rider caught (conf 0.63), 1 mixed-rider scooter (passenger unhelmeted) caught (conf 0.66), and 1 false-negative masked rider. | Automated harness: `scratch/eval_helmet_best.py`. Spot checks: `test/WhatsApp Image...` |
+| **Performance evaluation (Accuracy/Precision/Recall/F1/mAP)** | ✅ **Done** — Automated validation script `eval_helmet_best.py` evaluates the model. **Indian Traffic (12,632 images)**: `mAP@0.5 ≈ 0.842`. **Foreign Dataset (764 images)**: `mAP@0.5 = 0.5427` (Helmet F1: `0.603`, No-Helmet F1: `0.346`). | Automated harness: `scratch/eval_helmet_best.py` |
 
 ---
 

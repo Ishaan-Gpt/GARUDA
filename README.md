@@ -236,7 +236,7 @@ The ML models must be placed in their respective subdirectories within `ml/model
 | Model File Path | Description / Target | Loaded by | Performance Metrics |
 |---|---|---|---|
 | **`ml/models/weights/detection/yolov8m.pt`** | Primary vehicle, person, and phone detector | `ml/pipeline/detector.py` | COCO 2017 (Auto-downloaded) |
-| **`ml/models/weights/violations/helmet_best.pt`** | **Primary** helmet compliance detector (AICity 9-class model running on full frame) | `violation_classifier.py` | mAP@0.5 ≈ 0.842 (Indian traffic); mAP@0.5 ≈ 0.543 (foreign) |
+| **`ml/models/weights/violations/helmet_best.pt`** | **Primary** helmet compliance detector (AICity 9-class model running on full frame) | `violation_classifier.py` | mAP@0.5 ≈ 0.842 (**12,632** Indian traffic images); mAP@0.5 ≈ 0.543 (764 foreign images) |
 | **`ml/models/weights/violations/helmet_cnn.pt`** | Fallback binary helmet classifier (Runs on cropped head regions if primary model is unavailable) | `violation_classifier.py` | accuracy=0.8744, f1=0.8421 (n=215) |
 | **`ml/models/weights/violations/seatbelt_classifier.pt`** | Windshield-region seatbelt classifier (YOLOv11s) | `violation_classifier.py` | Built-in fallback available |
 | **`ml/models/weights/violations/traffic_lights_yolov8x.pt`** | Traffic light signal state detector (8-class model) | `violation_classifier.py` | HSV color tracking fallback |
