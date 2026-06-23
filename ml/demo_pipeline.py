@@ -109,7 +109,7 @@ def _push_to_backend(
             "plate": plate_info or None,
             "escalation_reason": "",
         }
-        resp = httpx.post(f"{backend_url}/api/v1/violations/ingest", json=payload, timeout=3.0)
+        resp = httpx.post(f"{backend_url}/api/v1/violations/ingest", json=payload, timeout=3.0, verify=False)
         resp.raise_for_status()
         logger.info("      Pushed to backend: %s", violation_id)
     except Exception as e:
