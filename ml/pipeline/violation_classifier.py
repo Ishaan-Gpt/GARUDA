@@ -1074,12 +1074,22 @@ class ViolationClassifier:
     # debounce idea used for signal-state smoothing.
     WRONG_SIDE_STRIKES_REQUIRED = 2
 
+    # Buses are exempt from wrong-side checks: pulling into/out of a marked
+    # bus bay routinely involves a sharp cross-traffic merge that can point
+    # well "backward" relative to the through-lane direction for several
+    # consecutive frames — a legitimate, expected maneuver, not lane
+    # discipline. Confirmed on real footage: a bus's normal bay merge swept
+    # through the same screen region as an adjacent wrong-way scooter and
+    # tripped the same angle+persistence gate the scooter did.
+    WRONG_SIDE_EXEMPT_CLASSES = ("bus",)
+
     def check_wrong_side(
         self,
         velocity: Tuple[float, float],
         latest_bbox: List[float],
         track_id: Optional[int] = None,
         direction: Optional[str] = None,
+        vehicle_class: Optional[str] = None,
     ) -> Optional[ViolationResult]:
         """
         Detect wrong-side driving: a vehicle heading backward relative to
@@ -1088,14 +1098,20 @@ class ViolationClassifier:
 
         Parameters
         ----------
-        velocity  : (vx, vy) from tracker
-        track_id  : Tracker ID, used to persist a per-vehicle strike counter
-                    across calls so a single noisy frame can't trigger a
-                    violation. None disables persistence (always strike 1).
-        direction : "down"|"up"|"left"|"right" — legal direction of travel as
-                    seen by this camera. Falls back to self.traffic_direction
-                    (set per-camera by the caller) when not given explicitly.
+        velocity      : (vx, vy) from tracker
+        track_id      : Tracker ID, used to persist a per-vehicle strike
+                        counter across calls so a single noisy frame can't
+                        trigger a violation. None disables persistence
+                        (always strike 1).
+        direction     : "down"|"up"|"left"|"right" — legal direction of
+                        travel as seen by this camera. Falls back to
+                        self.traffic_direction (set per-camera by the
+                        caller) when not given explicitly.
+        vehicle_class : Detection.class_name — buses are exempt, see
+                        WRONG_SIDE_EXEMPT_CLASSES.
         """
+        if vehicle_class in self.WRONG_SIDE_EXEMPT_CLASSES:
+            return None
         if not self.wrong_side_zone:
             return None
 
@@ -1491,7 +1507,7 @@ class ViolationClassifier:
                     if v:
                         results.append(v)
 
-                    v = self.check_wrong_side((vx, vy), vehicle.bbox, track_id=tid)
+                    v = self.check_wrong_side((vx, vy), vehicle.bbox, track_id=tid, vehicle_class=vehicle.class_name)
                     if v:
                         results.append(v)
 

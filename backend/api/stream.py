@@ -507,6 +507,16 @@ def _render_frame_full(
                 ph, pw = annotated.shape[:2]
                 crop = processed[max(0, y1):min(ph, y2), max(0, x1):min(pw, x2)]
                 plate_result = ml.ocr.read_plate_from_vehicle(crop) if crop.size > 0 else None
+                # Plate OCR was being computed for every fresh violation but
+                # never actually drawn onto the rendered video — it only ever
+                # reached the DB record. Draw it under the vehicle's box so
+                # the plate is visible in the video itself, not just the API
+                # response.
+                if plate_result is not None and plate_result.formatted_text:
+                    ml.visualizer.draw_plate_result(
+                        annotated, plate_result.formatted_text, plate_result.confidence,
+                        plate_result.is_valid, position=(x1, min(y2 + 25, ph - 5)),
+                    )
                 new_violations.append({
                     "track_id": det.track_id,
                     "seq": seq,

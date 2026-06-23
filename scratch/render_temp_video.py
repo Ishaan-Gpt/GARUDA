@@ -30,8 +30,11 @@ STOP_LINE_Y = 380  # default calibration — no camera registered for these ad-h
 # registered camera exists for these, so there's nothing to load from the
 # DB) — keyed by input filename. wrong_side_zone/traffic_direction here cover
 # the narrow bus-stop service lane where a scooter rider was observed riding
-# down it, turning around, and riding back up against the direction they
-# (and the lane's apparent flow) had been going.
+# down it, then turning around and riding back up against the direction
+# they (and the lane's apparent flow) had been going. The zone also sweeps
+# through the bus's legitimate bus-bay merge path from this camera's oblique
+# angle, but ViolationClassifier.check_wrong_side() now exempts buses
+# (WRONG_SIDE_EXEMPT_CLASSES) so that no longer false-positives.
 CALIBRATION_OVERRIDES = {
     "WhatsApp Video 2026-06-23 at 11.51.08.mp4": {
         "wrong_side_zone": [[1000, 300, 1900, 1300]],
