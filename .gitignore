@@ -20,6 +20,7 @@ test_assets/
 test/
 BACKEND_REFERENCE_VIDEO/
 *.mp4
+!VN20260624_094038.mp4
 *.avi
 *.mov
 
